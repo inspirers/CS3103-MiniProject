@@ -1,0 +1,43 @@
+# Auto-detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Python source files
+*.py        text diff=python
+*.pyw       text diff=python
+*.pyi       text diff=python
+
+# Documentation & Configs
+*.md        text
+*.rst       text
+*.txt       text
+*.json      text
+*.yaml      text
+*.yml       text
+*.toml      text
+*.ini       text
+
+# Shell scripts (ensure LF line endings on all OSes)
+*.sh        text eol=lf
+*.bash      text eol=lf
+
+# Windows batch scripts (ensure CRLF line endings)
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Binary files
+*.pyc       binary
+*.pyo       binary
+*.pyd       binary
+*.so        binary
+*.dylib     binary
+*.dll       binary
+*.exe       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+*.tar.gz    binary
+*.whl       binary
