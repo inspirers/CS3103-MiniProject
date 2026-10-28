@@ -30,10 +30,12 @@ from typing import Any
 
 import websockets
 
+from data_queue import SourceQueue
+
 # Naive global set of currently connected student clients.
 # There is deliberately no per-client queue or recovery state here.
 CLIENTS: set[Any] = set()
-
+SOURCEQUEUE: SourceQueue = SourceQueue(60)
 
 async def broadcast_naively(raw_message: str) -> None:
     """Send one message directly to every connected client.
@@ -68,9 +70,8 @@ async def handle_source(ws, hello: dict[str, Any]) -> None:
 
             msg_type = msg.get("type")
             if msg_type == "CAPTION_UPDATE":
-                # Baseline behavior: forward exactly what was received.
-                # No history, state, validation, coalescing, or bounded queues.
-                await broadcast_naively(raw)
+                SourceQueue.add(msg)
+                await broadcast_naively(raw) # Need to implement per client asyncio.Queue
             elif msg_type == "SOURCE_DONE":
                 # Test-control message. The specification does not require it
                 # to be forwarded to clients.
