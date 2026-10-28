@@ -21,6 +21,9 @@ const statusEl = document.getElementById("status");
 const liveEl = document.getElementById("live");
 const recallEl = document.getElementById("recall");
 
+const RECONNECT_MIN_MS = 300;
+const RECONNECT_MAX_MS = 12000;
+
 let ws;
 
 function numericClientId() {
@@ -42,40 +45,106 @@ function appendNaively(msg) {
   liveEl.scrollTop = liveEl.scrollHeight;
 }
 
+const conn = {
+  ws: null,
+  status: "disconnected",
+  attempts: 0,
+  reconnectTimer: null,
+  reconnectInMs: 0,
+  lastResumeFrom: 0,
+  lastHistoryItems: 0,
+};
+
+function helloFrame() {
+  // Arvid Peter Boisen 2026-10-28
+  // Send Hello frame,
+  // TODO implement last segment and last revision, make history_seconds dynamic
+  return {
+    type: "CLIENT_HELLO",
+    client_id: numericClientId(),
+    session: "L1",
+    last_segment: 0,
+    last_revision: 0,
+    history_seconds: 30,
+  };
+}
+
 function connect() {
-  statusEl.textContent = "connecting";
-  ws = new WebSocket(WS_URL);
+  // Arvid Peter Boisen 2026-10-28
+  // If the client is already connected or trying to connect no need to try again
+  if (conn.ws && (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  clearTimeout(conn.reconnectTimer);
+  conn.reconnectTimer = null;
+  conn.status = "connecting";
+  conn.lastResumeFrom = 1; // TODO Update this value from storage
+  render();
+
+  // Arvid Peter Boisen 2026-10-28
+  // Try to connect to WebSocket
+  let ws;
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch (err) {
+    logEvent(`cannot open socket: ${err}`);
+    scheduleReconnect();
+    return;
+  }
+  conn.ws = ws;
 
   ws.addEventListener("open", () => {
-    statusEl.textContent = "connected";
-    ws.send(JSON.stringify({
-      type: "CLIENT_HELLO",
-      client_id: numericClientId(),
-      session: "L1",
-      last_segment: 0,       // TODO: resume latest finalized state
-      last_revision: 0,
-      history_seconds: 30
-    }));
+    conn.status = "connected";
+    conn.attempts = 0;
+    ws.send(JSON.stringify(helloFrame()));
+    render();
   });
 
   ws.addEventListener("message", (event) => {
-    const msg = JSON.parse(event.data);
-    if (msg.type === "CAPTION_UPDATE") {
-      appendNaively(msg);
-    } else if (msg.type === "HISTORY") {
-      console.log(`HISTORY with ${msg.items?.length ?? 0} item(s)`, msg);
-      // TODO: merge history without stale/duplicate final captions.
+    // Arvid Peter Boisen 2026-10-28
+    // parse incoming message as json then handle msg
+    // on error increase ignored count
+    let msg;
+    try {
+      msg = JSON.parse(event.data);
+    } catch {
+      store.counts.ignored += 1;
+      render();
+      return;
     }
+    handleFrame(msg);
   });
 
   ws.addEventListener("close", () => {
-    statusEl.textContent = "disconnected";
-    // TODO: automatic reconnect after a short delay, using finalized resume state.
+    conn.ws = null;
+    conn.status = "reconnecting";
+    scheduleReconnect();
   });
 
   ws.addEventListener("error", () => {
-    statusEl.textContent = "connection error";
+    conn.status = "connection error";
+    render();
   });
+}
+
+function scheduleReconnect() {
+  conn.attempts += 1;
+
+  // Arvid Peter Boisen 2026-10-28
+  // Perform exponential backoff for retrying to connect
+  // Limit exp to 10 to avoid overflow error, max reconnect time is also limited by RECONNECT_MAX_MS
+
+  const exp = Math.min(conn.attempts - 1, 10);
+  const backoff = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** exp);
+
+  // Arvid Peter Boisen 2026-10-28
+  // Introduce a small randomness so in case the server dies
+  // and later comes online all clients does not try to reconnect at the exact same time
+
+  const delay = Math.round(backoff * (0.75 + Math.random() * 0.5));
+  conn.reconnectInMs = delay;
+  conn.reconnectTimer = setTimeout(() => connect(`retry #${conn.attempts}`), delay);
+  render();
 }
 
 for (const button of document.querySelectorAll("button[data-seconds]")) {
@@ -85,4 +154,34 @@ for (const button of document.querySelectorAll("button[data-seconds]")) {
   });
 }
 
+function handleFrame(msg) {
+    const type = msg?.type;
+    if (type === "CAPTION_UPDATE") {
+      appendNaively(msg);
+    } else if (type === "HISTORY") {
+      console.log(`HISTORY with ${msg.items?.length ?? 0} item(s)`, msg);
+      // TODO: merge history without stale/duplicate final captions.
+      // Do part E here
+    }
+
+}
 connect();
+
+function render() {
+  if (!statusEl) return;
+
+  // Arvid Peter Boisen 2026-10-28
+  // Display the connection status in the browser
+  let connectionStatus = conn.status;
+  if (conn.status === "connecting" && conn.attempts > 0) {
+    connectionStatus = `connecting (attempt #${conn.attempts})…`;
+  } else if (conn.status === "reconnecting") {
+    const secs = (conn.reconnectInMs / 1000).toFixed(1);
+    connectionStatus = `reconnecting in ${secs}s (attempt #${conn.attempts})…`;
+  } else if (conn.status === "connected" && conn.lastResumeFrom > 0) {
+    connectionStatus = `connected (resumed from segment #${conn.lastResumeFrom})`;
+  }
+
+  statusEl.textContent = connectionStatus;
+  statusEl.dataset.state = conn.status;
+}
