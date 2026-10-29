@@ -86,11 +86,12 @@ async def handle_source(ws, hello: dict[str, Any]) -> None:
 
 async def handle_client(ws, hello: dict[str, Any]) -> None:
     client_id = hello.get("client_id")
+    last_segment = hello.get("last_segment", 0)
+    last_revision = hello.get("last_revision", 0)
+    history_seconds = hello.get("history_seconds", 60)
 
-    # The baseline has no stored recovery state. Sending an empty HISTORY makes
-    # the connection behavior visible and keeps the starter easy to inspect.
-    # Students must implement correct HISTORY semantics for the assignment.
-    await ws.send(json.dumps({"type": "HISTORY", "items": []}))
+    history = SOURCEQUEUE.get_latest(window=history_seconds, segment=last_segment, revision=last_revision)
+    await ws.send(json.dumps({"type": "HISTORY", "items": history}))
 
     CLIENTS.add(ws)
     print(f"client connected: id={client_id}; clients={len(CLIENTS)}", flush=True)

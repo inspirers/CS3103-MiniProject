@@ -33,13 +33,13 @@ class SourceQueue:
         
         return True
 
-    def get_latest(self, window = 60, segment = 0) -> list[Message]:
+    def get_latest(self, window = 60, segment = 0, revision = 0) -> list[Message]:
         result: list[Message] = []
         for seg, data in self.history.items():
             lifetime = self.latest_timestamp - data["source_ts"]
-            if lifetime <= window and data["segment"] >= segment:
+            if (lifetime > window and seg > segment
+                or (seg == segment and data.get(revision, 0) > revision)):
                 result.append(data)
-
         return result
 
     def cleanup(self):
