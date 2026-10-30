@@ -22,6 +22,8 @@ const RECONNECT_MIN_MS = 300;
 const RECONNECT_MAX_MS = 12000;
 const MAX_EVENT_LINES = 40;
 const DEFAULT_RECALL_SECONDS = 30;  
+const LOCAL_HISTORY_SECONDS = 65;
+const RECALL_WINDOWS = [15, 30, 60];
 
 const statusEl = document.getElementById("status");
 const liveEl = document.getElementById("live");
@@ -136,7 +138,30 @@ function applyCaption(caption, fromHistory = false) {
 }
 
 function pruneHistory() {
-// TODO b. maintain >=60 s of finalized local state
+  // Keep a small margin beyond the required 60 seconds so captions on the
+  // boundary are not lost because of timestamp rounding or uneven updates.
+  const cutoff = latestSourceTs - LOCAL_HISTORY_SECONDS;
+  const retainedFinals = [];
+
+  for (const caption of finals) {
+    if (caption.source_ts >= cutoff) {
+      retainedFinals.push(caption);
+      continue;
+    }
+
+    // Only remove the segment if this finalized caption is still its current
+    // state. Provisional captions are deliberately left untouched.
+    const held = segments.get(caption.segment);
+    if (held?.final && held.revision === caption.revision) {
+      segments.delete(caption.segment);
+
+      const row = rows.get(caption.segment);
+      if (row) row.remove();
+      rows.delete(caption.segment);
+    }
+  }
+
+  finals = retainedFinals;
 }
 
 
@@ -207,28 +232,40 @@ function renderActive() {
 }
 
 // Arvid Peter Boisen 2026-10-30
-// Render missing captions.
+// Render finalized captions already held by this tab for the selected window.
+// This function never contacts the server.
 function renderRecall(seconds) {
-  recallSeconds = seconds;
+  const requestedSeconds = Number(seconds);
+  recallSeconds = RECALL_WINDOWS.includes(requestedSeconds)
+    ? requestedSeconds
+    : DEFAULT_RECALL_SECONDS;
+
   for (const button of document.querySelectorAll("button[data-seconds]")) {
-    button.setAttribute("aria-pressed", String(Number(button.dataset.seconds) === seconds));
+    button.setAttribute(
+      "aria-pressed",
+      String(Number(button.dataset.seconds) === recallSeconds),
+    );
   }
 
   // "Now" is the newest caption we have seen, so the window is measured in
   // lecture time and is not affected by a clock difference with the server.
-  const cutoff = latestSourceTs - seconds;
-  const shown = finals.filter((caption) => caption.source_ts >= cutoff);
-  recallTitleEl.textContent = `Missing in the last ${seconds} s: ${shown.length} finalized caption(s)`;
+  const cutoff = latestSourceTs - recallSeconds;
+  const shown = finals
+    .filter((caption) => caption.final && caption.source_ts >= cutoff)
+    .sort((left, right) =>
+      left.source_ts - right.source_ts || left.segment - right.segment,
+    );
+  recallTitleEl.textContent =
+    `Missing in the last ${recallSeconds} s: ${shown.length} finalized caption(s)`;
 
   recallEl.replaceChildren();
   if (!shown.length) {
-    const note = document.createElement("span");
+    const note = document.createElement("div");
     note.className = "hint";
     note.textContent = finals.length
-      ? "Nothing in this window yet."
-      : "No finalized caption has reached this client yet.";
+      ? `No finalized captions were received in this ${recallSeconds}-second window.`
+      : "No finalized captions are stored locally yet.";
     recallEl.append(note);
-    return;
   }
 
   for (const caption of shown) {
@@ -243,13 +280,17 @@ function renderRecall(seconds) {
     recallEl.append(line);
   }
 
-  // Server has sent captions
-  const covered = latestSourceTs - finals[0].source_ts;
-  if (covered < seconds) {
+  // Be explicit when this tab has less local finalized context than requested,
+  // for example shortly after joining or reconnecting.
+  const oldestFinalTs = finals.length
+    ? Math.min(...finals.map((caption) => caption.source_ts))
+    : latestSourceTs;
+  const covered = Math.max(0, latestSourceTs - oldestFinalTs);
+  if (finals.length && covered < recallSeconds) {
     const note = document.createElement("div");
     note.className = "hint";
-    note.textContent = `This tab only holds ${Math.round(covered)} s of finalized history ` +
-      "(it joined or reconnected recently); anything older would have to come from the server.";
+    note.textContent = `Only ${Math.round(covered)} s of finalized history is available locally; ` +
+      `this tab may have joined or reconnected too recently to cover the full ${recallSeconds} s.`;
     recallEl.append(note);
   }
 }
@@ -263,13 +304,14 @@ function helloFrame() {
     session: SESSION,
     last_segment: lastFinalSegment,
     last_revision: lastFinalRevision,
-    history_seconds: 30,
+    history_seconds: historySeconds(),
   };
 }
 
 function historySeconds() {
-  // TODO Implement this
-  return DEFAULT_RECALL_SECONDS;
+  // Request enough recovery context to support every local recall view. The
+  // panel still opens on the 30-second default; this only controls recovery.
+  return Math.max(...RECALL_WINDOWS);
 }
 
 function connect(reason = "initial") {
@@ -370,7 +412,72 @@ function handleFrame(msg) {
 }
 
 function mergeHistory(msg) {
-  // TODO Part E here
+  counts.historyFrames += 1;
+
+  if (!Array.isArray(msg?.items)) {
+    counts.ignored += 1;
+    conn.lastHistoryItems = 0;
+    recoveryEl.hidden = false;
+    recoveryEl.textContent = "Ignored a malformed HISTORY frame: items must be an array.";
+    logEvent("ignored malformed HISTORY frame");
+    return;
+  }
+
+  const validCaptions = [];
+  let malformedItems = 0;
+
+  // Validate every history item through the same parser used for live updates.
+  for (const item of msg.items) {
+    const caption = readCaption(item);
+    if (!caption) {
+      counts.ignored += 1;
+      malformedItems += 1;
+      continue;
+    }
+    validCaptions.push(caption);
+  }
+
+  // HISTORY should already be oldest first, but sorting a copy makes merging
+  // deterministic even if a server sends valid items out of order.
+  validCaptions.sort((left, right) =>
+    left.source_ts - right.source_ts ||
+    left.segment - right.segment ||
+    left.revision - right.revision,
+  );
+
+  let recoveredItems = 0;
+  for (const caption of validCaptions) {
+    // applyCaption owns revision replacement, stale-update rejection, final
+    // deduplication, local-history pruning, and the recovered counter.
+    if (applyCaption(caption, true)) recoveredItems += 1;
+  }
+
+  const skippedItems = validCaptions.length - recoveredItems;
+  conn.lastHistoryItems = recoveredItems;
+  recoveryEl.hidden = false;
+
+  if (recoveredItems > 0) {
+    recoveryEl.textContent =
+      `Recovered ${recoveredItems} finalized caption(s) from server history.`;
+  } else if (validCaptions.length > 0) {
+    recoveryEl.textContent =
+      `History checked: all ${validCaptions.length} item(s) were already held or stale; ` +
+      "no duplicate captions were added.";
+  } else {
+    recoveryEl.textContent = "History checked: no captions needed recovery.";
+  }
+
+  if (skippedItems > 0 && recoveredItems > 0) {
+    recoveryEl.textContent += ` Skipped ${skippedItems} duplicate or stale item(s).`;
+  }
+  if (malformedItems > 0) {
+    recoveryEl.textContent += ` Ignored ${malformedItems} malformed item(s).`;
+  }
+
+  logEvent(
+    `HISTORY: ${recoveredItems} recovered, ${skippedItems} duplicate/stale, ` +
+    `${malformedItems} malformed`,
+  );
 }
 
 function renderStatus() {
