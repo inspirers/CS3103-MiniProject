@@ -1,7 +1,9 @@
-from typing import Any, Optional
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
 
 # Type alias for message from source or clients
-type Message = dict[str, Any]
+Message = Dict[str, Any]
 
 class SourceQueue:
     def __init__(self, window = 60) -> None:
@@ -15,7 +17,7 @@ class SourceQueue:
         source_ts = data["source_ts"]
         if segment in self.history:
             if (self.history[segment]["final"] 
-                or self.history[segment]["revision"] > data["revision"] 
+                or self.history[segment]["revision"] >= data["revision"]
                 or self.latest_timestamp - source_ts > self.window):
                 return False
 
@@ -41,10 +43,15 @@ class SourceQueue:
             is_newer_segment = seg > segment
             is_newer_revision_of_same = (seg == segment and data.get("revision", 0) > revision)
             
-            if is_within_window and (is_newer_segment or is_newer_revision_of_same):
+            if data["final"] and is_within_window and (is_newer_segment or is_newer_revision_of_same):
                 result.append(data)
 
         return result
+
+    def reset(self) -> None:
+        self.history.clear()
+        self.latest_timestamp = 0
+        self.earliest_timestamp = None
 
     def cleanup(self):
         to_delete: list[int] = []

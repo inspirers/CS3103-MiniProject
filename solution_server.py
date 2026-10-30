@@ -68,7 +68,7 @@ def parse_caption(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
         segment = int(msg["segment"])
         revision = int(msg["revision"])
         source_ts = float(msg["source_ts"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None
     if segment < 1 or revision < 1:
         return None
@@ -81,6 +81,14 @@ def parse_caption(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
         "final": bool(msg.get("final")),
         "text": str(msg.get("text", "")),
     }
+
+
+def int_field(msg: dict[str, Any], name: str, default: int) -> int:
+    """Return a non-negative integer field, or default if it is unusable."""
+    try:
+        return max(0, int(msg.get(name, default)))
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 class ClientChannel:
@@ -137,6 +145,10 @@ class ClientChannel:
                 return
         self.pending[segment] = (revision, caption["final"], caption, frame)
         self.wakeup.set()
+
+    def reset(self) -> None:
+        self.pending.clear()
+        self.last_sent.clear()
 
     def _shed(self) -> None:
         """Queue full: drop provisionals; if still full of finals, close the client."""
@@ -277,21 +289,37 @@ def fan_out(caption: dict[str, Any]) -> None:
         channel.enqueue(caption, frame)
 
 
+def reset_lecture() -> None:
+    """Forget the old lecture, since a new one reuses its segment numbers."""
+    SOURCEQUEUE.reset()
+    for channel in CLIENTS:
+        channel.reset()
+
+
 async def handle_source(ws, hello: dict[str, Any]) -> None:
     session = hello.get("session")
     print(f"source connected: session={session}", flush=True)
+    first_caption = True
 
     try:
         async for raw in ws:
             try:
                 msg = json.loads(raw)
-            except json.JSONDecodeError:
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
                 continue
 
             msg_type = msg.get("type")
             if msg_type == "CAPTION_UPDATE":
                 caption = parse_caption(msg)
-                if caption is not None and SOURCEQUEUE.add(caption):
+                if caption is None:
+                    continue
+                # A new source connection starting at segment 1 is a new lecture.
+                if first_caption and caption["segment"] == 1 and SOURCEQUEUE.history:
+                    reset_lecture()
+                first_caption = False
+                if SOURCEQUEUE.add(caption):
                     fan_out(caption)
             elif msg_type == "SOURCE_DONE":
                 # Test-control message. The specification does not require it
@@ -307,9 +335,9 @@ async def handle_source(ws, hello: dict[str, Any]) -> None:
 
 async def handle_client(ws, hello: dict[str, Any]) -> None:
     client_id = hello.get("client_id")
-    last_segment = hello.get("last_segment", 0)
-    last_revision = hello.get("last_revision", 0)
-    history_seconds = hello.get("history_seconds", 60)
+    last_segment = int_field(hello, "last_segment", 0)
+    last_revision = int_field(hello, "last_revision", 0)
+    history_seconds = min(int_field(hello, "history_seconds", 60), 60)
 
     # No await between history snapshot and registration, so no gap or duplicate.
     history = SOURCEQUEUE.get_latest(window=history_seconds, segment=last_segment, revision=last_revision)
@@ -332,11 +360,11 @@ async def handler(ws) -> None:
     try:
         raw = await asyncio.wait_for(ws.recv(), timeout=5)
         hello = json.loads(raw)
-    except (asyncio.TimeoutError, json.JSONDecodeError):
+    except (asyncio.TimeoutError, ValueError):
         await ws.close(code=1008, reason="Expected a valid hello message")
         return
 
-    msg_type = hello.get("type")
+    msg_type = hello.get("type") if isinstance(hello, dict) else None
     if msg_type == "SOURCE_HELLO":
         await handle_source(ws, hello)
     elif msg_type == "CLIENT_HELLO":
