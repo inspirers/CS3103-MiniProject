@@ -411,7 +411,72 @@ function handleFrame(msg) {
 }
 
 function mergeHistory(msg) {
-  // TODO Part E here
+  counts.historyFrames += 1;
+
+  if (!Array.isArray(msg?.items)) {
+    counts.ignored += 1;
+    conn.lastHistoryItems = 0;
+    recoveryEl.hidden = false;
+    recoveryEl.textContent = "Ignored a malformed HISTORY frame: items must be an array.";
+    logEvent("ignored malformed HISTORY frame");
+    return;
+  }
+
+  const validCaptions = [];
+  let malformedItems = 0;
+
+  // Validate every history item through the same parser used for live updates.
+  for (const item of msg.items) {
+    const caption = readCaption(item);
+    if (!caption) {
+      counts.ignored += 1;
+      malformedItems += 1;
+      continue;
+    }
+    validCaptions.push(caption);
+  }
+
+  // HISTORY should already be oldest first, but sorting a copy makes merging
+  // deterministic even if a server sends valid items out of order.
+  validCaptions.sort((left, right) =>
+    left.source_ts - right.source_ts ||
+    left.segment - right.segment ||
+    left.revision - right.revision,
+  );
+
+  let recoveredItems = 0;
+  for (const caption of validCaptions) {
+    // applyCaption owns revision replacement, stale-update rejection, final
+    // deduplication, local-history pruning, and the recovered counter.
+    if (applyCaption(caption, true)) recoveredItems += 1;
+  }
+
+  const skippedItems = validCaptions.length - recoveredItems;
+  conn.lastHistoryItems = recoveredItems;
+  recoveryEl.hidden = false;
+
+  if (recoveredItems > 0) {
+    recoveryEl.textContent =
+      `Recovered ${recoveredItems} finalized caption(s) from server history.`;
+  } else if (validCaptions.length > 0) {
+    recoveryEl.textContent =
+      `History checked: all ${validCaptions.length} item(s) were already held or stale; ` +
+      "no duplicate captions were added.";
+  } else {
+    recoveryEl.textContent = "History checked: no captions needed recovery.";
+  }
+
+  if (skippedItems > 0 && recoveredItems > 0) {
+    recoveryEl.textContent += ` Skipped ${skippedItems} duplicate or stale item(s).`;
+  }
+  if (malformedItems > 0) {
+    recoveryEl.textContent += ` Ignored ${malformedItems} malformed item(s).`;
+  }
+
+  logEvent(
+    `HISTORY: ${recoveredItems} recovered, ${skippedItems} duplicate/stale, ` +
+    `${malformedItems} malformed`,
+  );
 }
 
 function renderStatus() {
