@@ -22,6 +22,7 @@ const RECONNECT_MIN_MS = 300;
 const RECONNECT_MAX_MS = 12000;
 const MAX_EVENT_LINES = 40;
 const DEFAULT_RECALL_SECONDS = 30;  
+const LOCAL_HISTORY_SECONDS = 65;
 
 const statusEl = document.getElementById("status");
 const liveEl = document.getElementById("live");
@@ -136,7 +137,30 @@ function applyCaption(caption, fromHistory = false) {
 }
 
 function pruneHistory() {
-// TODO b. maintain >=60 s of finalized local state
+  // Keep a small margin beyond the required 60 seconds so captions on the
+  // boundary are not lost because of timestamp rounding or uneven updates.
+  const cutoff = latestSourceTs - LOCAL_HISTORY_SECONDS;
+  const retainedFinals = [];
+
+  for (const caption of finals) {
+    if (caption.source_ts >= cutoff) {
+      retainedFinals.push(caption);
+      continue;
+    }
+
+    // Only remove the segment if this finalized caption is still its current
+    // state. Provisional captions are deliberately left untouched.
+    const held = segments.get(caption.segment);
+    if (held?.final && held.revision === caption.revision) {
+      segments.delete(caption.segment);
+
+      const row = rows.get(caption.segment);
+      if (row) row.remove();
+      rows.delete(caption.segment);
+    }
+  }
+
+  finals = retainedFinals;
 }
 
 
