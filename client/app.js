@@ -69,7 +69,7 @@ function helloFrame() {
   };
 }
 
-function connect() {
+function connect(reason = "initial") {
   // Arvid Peter Boisen 2026-10-28
   // If the client is already connected or trying to connect no need to try again
   if (conn.ws && (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING)) {
@@ -97,6 +97,7 @@ function connect() {
     conn.status = "connected";
     conn.attempts = 0;
     ws.send(JSON.stringify(helloFrame()));
+    logEvent(`${reason}: connected, resuming after segment ${store.highestFinalSegment}`);
     render();
   });
 
@@ -184,4 +185,40 @@ function render() {
 
   statusEl.textContent = connectionStatus;
   statusEl.dataset.state = conn.status;
+}
+
+const events = [];
+function logEvent(text) {
+  const stamp = new Date().toISOString().slice(11, 19);
+  events.push(`${stamp}  ${text}`);
+  if (events.length > 60) events.shift();
+}
+
+const els = {};
+function bindElements() {
+  for (const id of ["status", "meta", "active", "live", "missed", "recall",
+                    "recall-title", "stats", "events", "recovery"]) {
+    els[id] = document.getElementById(id);
+  }
+}
+
+function bindControls() {
+  document.getElementById("reconnect").addEventListener("click", () => {
+    if (conn.ws && conn.ws.readyState === WebSocket.OPEN) {
+      conn.ws.close(1000, "client requested reconnect");
+    } else {
+      connect("reconnect");
+    }
+  });
+  document.getElementById("reset").addEventListener("click", () => {
+    sessionStorage.removeItem("liverecall-client-id");
+    location.reload();
+  });
+  document.addEventListener("visibilitychange", () => {
+    // A laptop waking up is the common real-world "am I behind?" case.
+    if (!document.hidden && (!conn.ws || conn.ws.readyState !== WebSocket.OPEN)) {
+      connect("tab resumed");
+    }
+  });
+  window.addEventListener("online", () => connect("browser back online"));
 }

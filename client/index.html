@@ -16,15 +16,39 @@
 </head>
 <body>
   <h1>LiveRecall</h1>
-  <p>Connection: <span id="status">disconnected</span></p>
-  <p class="hint">Starter behavior is intentionally naive: every received revision is appended as a new line.</p>
+  <p>Connection: <span id="status" data-state="disconnected">disconnected</span></p>
+  <p class="hint" id="meta">connecting&hellip;</p>
+  <p id="recovery" hidden></p>
+
+  <h2>Now showing (provisional revisions replace each other in place)</h2>
+  <div id="active"></div>
+
+  <!-- <p>Connection: <span id="status">disconnected</span></p> -->
+  <!-- <p class="hint">Starter behavior is intentionally naive: every received revision is appended as a new line.</p> -->
+  
+  <h2>Recent captions</h2>
   <div id="live"></div>
+  <p id="missed"></p>
+  
+  <h2>Recall</h2>
   <div>
     <button data-seconds="30">What did I miss? (30 s)</button>
     <button data-seconds="15">15 s</button>
     <button data-seconds="60">60 s</button>
+    <button id="reconnect">Reconnect now</button>
+    <button id="reset">New client id</button>
   </div>
-  <div id="recall">TODO: implement the locally maintained recall view.</div>
+  <h3 id="recall-title">What did I miss?</h3>
+  <div id="recall"></div>
+
+  <!-- <div id="recall">TODO: implement the locally maintained recall view.</div> -->
+
+  <h2>Client self-check (invariants enforced locally)</h2>
+  <div id="stats">starting&hellip;</div>
+
+  <h2>Event log</h2>
+  <div id="events"></div>
+
   <script src="app.js"></script>
 </body>
 </html>
