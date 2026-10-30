@@ -23,6 +23,7 @@ const RECONNECT_MAX_MS = 12000;
 const MAX_EVENT_LINES = 40;
 const DEFAULT_RECALL_SECONDS = 30;  
 const LOCAL_HISTORY_SECONDS = 65;
+const RECALL_WINDOWS = [15, 30, 60];
 
 const statusEl = document.getElementById("status");
 const liveEl = document.getElementById("live");
@@ -231,28 +232,40 @@ function renderActive() {
 }
 
 // Arvid Peter Boisen 2026-10-30
-// Render missing captions.
+// Render finalized captions already held by this tab for the selected window.
+// This function never contacts the server.
 function renderRecall(seconds) {
-  recallSeconds = seconds;
+  const requestedSeconds = Number(seconds);
+  recallSeconds = RECALL_WINDOWS.includes(requestedSeconds)
+    ? requestedSeconds
+    : DEFAULT_RECALL_SECONDS;
+
   for (const button of document.querySelectorAll("button[data-seconds]")) {
-    button.setAttribute("aria-pressed", String(Number(button.dataset.seconds) === seconds));
+    button.setAttribute(
+      "aria-pressed",
+      String(Number(button.dataset.seconds) === recallSeconds),
+    );
   }
 
   // "Now" is the newest caption we have seen, so the window is measured in
   // lecture time and is not affected by a clock difference with the server.
-  const cutoff = latestSourceTs - seconds;
-  const shown = finals.filter((caption) => caption.source_ts >= cutoff);
-  recallTitleEl.textContent = `Missing in the last ${seconds} s: ${shown.length} finalized caption(s)`;
+  const cutoff = latestSourceTs - recallSeconds;
+  const shown = finals
+    .filter((caption) => caption.final && caption.source_ts >= cutoff)
+    .sort((left, right) =>
+      left.source_ts - right.source_ts || left.segment - right.segment,
+    );
+  recallTitleEl.textContent =
+    `Missing in the last ${recallSeconds} s: ${shown.length} finalized caption(s)`;
 
   recallEl.replaceChildren();
   if (!shown.length) {
-    const note = document.createElement("span");
+    const note = document.createElement("div");
     note.className = "hint";
     note.textContent = finals.length
-      ? "Nothing in this window yet."
-      : "No finalized caption has reached this client yet.";
+      ? `No finalized captions were received in this ${recallSeconds}-second window.`
+      : "No finalized captions are stored locally yet.";
     recallEl.append(note);
-    return;
   }
 
   for (const caption of shown) {
@@ -267,13 +280,17 @@ function renderRecall(seconds) {
     recallEl.append(line);
   }
 
-  // Server has sent captions
-  const covered = latestSourceTs - finals[0].source_ts;
-  if (covered < seconds) {
+  // Be explicit when this tab has less local finalized context than requested,
+  // for example shortly after joining or reconnecting.
+  const oldestFinalTs = finals.length
+    ? Math.min(...finals.map((caption) => caption.source_ts))
+    : latestSourceTs;
+  const covered = Math.max(0, latestSourceTs - oldestFinalTs);
+  if (finals.length && covered < recallSeconds) {
     const note = document.createElement("div");
     note.className = "hint";
-    note.textContent = `This tab only holds ${Math.round(covered)} s of finalized history ` +
-      "(it joined or reconnected recently); anything older would have to come from the server.";
+    note.textContent = `Only ${Math.round(covered)} s of finalized history is available locally; ` +
+      `this tab may have joined or reconnected too recently to cover the full ${recallSeconds} s.`;
     recallEl.append(note);
   }
 }
