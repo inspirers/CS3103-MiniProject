@@ -304,13 +304,14 @@ function helloFrame() {
     session: SESSION,
     last_segment: lastFinalSegment,
     last_revision: lastFinalRevision,
-    history_seconds: 30,
+    history_seconds: historySeconds(),
   };
 }
 
 function historySeconds() {
-  // TODO Implement this
-  return DEFAULT_RECALL_SECONDS;
+  // Request enough recovery context to support every local recall view. The
+  // panel still opens on the 30-second default; this only controls recovery.
+  return Math.max(...RECALL_WINDOWS);
 }
 
 function connect(reason = "initial") {
