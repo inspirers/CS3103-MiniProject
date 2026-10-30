@@ -5,26 +5,76 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>LiveRecall Student Client</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-    #status { font-weight: 700; }
-    #live { min-height: 6rem; border: 1px solid #bbb; border-radius: .4rem; padding: 1rem; margin: 1rem 0; }
-    .naive-line { padding: .25rem 0; border-bottom: 1px dotted #ddd; }
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #16202a; }
+    h1 { margin-bottom: .2rem; }
+    h2 { font-size: 1.05rem; margin: 1.4rem 0 .4rem; }
+    h3 { font-size: .95rem; margin: .8rem 0 .3rem; }
+    .hint { font-size: .88rem; color: #5a6672; }
     button { padding: .55rem .75rem; margin: .2rem; }
-    #recall { white-space: pre-wrap; margin-top: 1rem; border-left: 3px solid #ccc; padding-left: 1rem; }
-    .hint { font-size: .9rem; color: #555; }
+    button[aria-pressed="true"] { outline: 2px solid #2f7d46; }
+
+    /* Connection state: the badge in the sentence "Connection: ...". */
+    #status { font-weight: 700; padding: .15rem .5rem; border-radius: .3rem; }
+    #status[data-state="connected"] { background: #dcf5e3; color: #16512c; }
+    #status[data-state="connecting"], #status[data-state="reconnecting"] { background: #fff2cc; color: #6b4e00; }
+    #status[data-state="disconnected"], #status[data-state="connection error"] { background: #fbdcdc; color: #7a1616; }
+    /* Captions fade out while the socket is down, so a dead tab is obvious. */
+    body[data-state="reconnecting"] #live, body[data-state="disconnected"] #live { opacity: .45; }
+
+    /* The sentence being spoken right now: one line, replaced in place. */
+    #active { border: 1px solid #bbb; border-radius: .4rem; padding: .8rem 1rem; background: #f7fafc; min-height: 2.6rem; }
+    #active .text { font-size: 1.35rem; }
+    #active .tag { display: block; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: #667; }
+
+    /* One row per segment; a new revision edits the row instead of adding one. */
+    #live { max-height: 22rem; overflow-y: auto; border: 1px solid #bbb; border-radius: .4rem; padding: .5rem .8rem; }
+    .caption { padding: .3rem .2rem; border-bottom: 1px dotted #ddd; border-left: 3px solid transparent; padding-left: .5rem; }
+    .caption .tag { display: inline-block; min-width: 4.6rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: #667; }
+    .caption.provisional { font-style: italic; color: #5a6672; border-left-color: #c8d2dc; }
+    .caption.final { color: #101820; border-left-color: #2f7d46; }
+    /* Short highlight so the audience can see a revision replace older text. */
+    .caption.updated { animation: flash .7s ease-out; }
+    @keyframes flash { from { background: #fff3b0; } to { background: transparent; } }
+
+    #recall { border-left: 3px solid #ccc; padding-left: 1rem; }
+    .recall-row { padding: .2rem 0; }
+    .recall-row .age { display: inline-block; min-width: 4rem; font-size: .8rem; color: #667; }
+
+    #recovery { padding: .4rem .6rem; border-left: 3px solid #2f7d46; background: #f2f8f4; }
+    #stats, #events { font-family: ui-monospace, monospace; font-size: .8rem; white-space: pre-wrap; color: #37424d; }
+    #events { max-height: 12rem; overflow-y: auto; }
   </style>
 </head>
-<body>
+<body data-state="disconnected">
   <h1>LiveRecall</h1>
-  <p>Connection: <span id="status">disconnected</span></p>
-  <p class="hint">Starter behavior is intentionally naive: every received revision is appended as a new line.</p>
+  <p>Connection: <span id="status" data-state="disconnected">disconnected</span></p>
+  <p class="hint" id="meta">connecting&hellip;</p>
+  <p id="recovery" hidden></p>
+
+  <h2>Now <span class="hint">(a newer revision of the same segment replaces this text in place)</span></h2>
+  <div id="active"><span class="hint">waiting for captions&hellip;</span></div>
+
+  <h2>Recent captions <span class="hint">(one line per segment: italic = provisional, green = final)</span></h2>
   <div id="live"></div>
+  <p id="missed" class="hint"></p>
+
+  <h2>What did I miss?</h2>
   <div>
-    <button data-seconds="30">What did I miss? (30 s)</button>
-    <button data-seconds="15">15 s</button>
-    <button data-seconds="60">60 s</button>
+    <button data-seconds="30" aria-pressed="true">What did I miss? (30 s)</button>
+    <button data-seconds="15" aria-pressed="false">15 s</button>
+    <button data-seconds="60" aria-pressed="false">60 s</button>
+    <button id="reconnect">Reconnect</button>
+    <button id="reset">New client id (late join)</button>
   </div>
-  <div id="recall">TODO: implement the locally maintained recall view.</div>
+  <h3 id="recall-title">What did I miss?</h3>
+  <div id="recall"><span class="hint">Pick a window above; it reads the captions stored in this tab.</span></div>
+
+  <h2>Metrics</h2>
+  <div id="stats">starting&hellip;</div>
+
+  <h2>Event log</h2>
+  <div id="events"></div>
+
   <script src="app.js"></script>
 </body>
 </html>
