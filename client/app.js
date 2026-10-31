@@ -17,6 +17,21 @@ const MAX_EVENT_LINES = 40;
 const DEFAULT_RECALL_SECONDS = 30;  
 const LOCAL_HISTORY_SECONDS = 65;
 const RECALL_WINDOWS = [15, 30, 60];
+// Only complain about a short local history when it is genuinely short, not
+// when it is within a second of the requested window (the caption rate is not
+// perfectly uniform, so the held span jitters around the requested length).
+const RECALL_NOTE_TOLERANCE_S = 1;
+// Deduplication memory has to outlive the visible history. The server can only
+// ever replay captions from inside its own bounded history window, so keeping
+// the finalized revision of every segment we have accepted for longer than any
+// such window is enough to reject a duplicate final forever, while the state
+// itself stays bounded.
+const DEDUP_RETENTION_SECONDS = 180;
+const DEDUP_MAX_ENTRIES = 2000;
+// Strict size bound on the retained final list. Normally the age cutoff does the
+// pruning; this only matters for a stream that never supplies a usable
+// source_ts, where no age-based cutoff can bound anything.
+const LOCAL_HISTORY_MAX_ENTRIES = 4000;
 
 const statusEl = document.getElementById("status");
 const liveEl = document.getElementById("live");
@@ -29,14 +44,22 @@ const recallTitleEl = document.getElementById("recall-title");
 const statsEl = document.getElementById("stats");
 const eventsEl = document.getElementById("events");
 
-const segments = new Map();  // segment -> caption
+const segments = new Map();  // segment -> caption (display window, gets pruned)
 const rows = new Map();      // segment -> its DOM row
+// segment -> { revision, source_ts } for every finalized caption this tab has
+// ever accepted. Kept after the caption leaves the visible window so a replayed
+// final can never be shown twice or counted as new information again.
+const finaled = new Map();
 let finals = [];             // finalized captions, oldest first
 let lastFinalSegment = 0;    // resume state reported to the server
 let lastFinalRevision = 0;
 let latestSourceTs = 0;      // newest source_ts seen = our idea of "now"
 let lastCaptionAt = 0;       // browser clock when the last caption arrived
 let recallSeconds = DEFAULT_RECALL_SECONDS;  // the recall window currently shown
+// Browser-clock anchor taken from the most recent caption that carried a usable
+// source_ts; used to place a caption whose source_ts was missing or invalid.
+let anchorSourceTs = null;
+let anchorBrowserTs = 0;
 
 const counts = {
   updates: 0,        // caption messages that were new information
@@ -56,6 +79,7 @@ const conn = {
   reconnectTimer: null,
   reconnectInMs: 0,
   lastResumeFrom: 0,
+  lastResumeRevision: 0,   // sent as last_revision in CLIENT_HELLO; read by the metrics panel
   lastHistoryItems: 0,
   connectedAt: 0, 
 };
@@ -70,27 +94,76 @@ function numericClientId() {
   return Number(value);
 }
 
-// Arvid Peter Boisen 2026-10-30
+// Arvid Peter Boisen 2026-10-30, timestamp handling fixed 2026-10-31
 // Keep only the protocol fields with the right types. Returning null for a
-// malformed frame means one bad message can never break the UI. A missing
-// source_ts on its own is tolerated, because dropping the item would lose a
-// real caption; it only makes the age display approximate.
+// malformed frame means one bad message can never break the UI. A missing or
+// unparseable source_ts is tolerated rather than dropped, because losing a real
+// caption is worse than an approximate age.
+//
+// It used to fall back to `latestSourceTs`, which is 0 for the very first frame.
+// The caption was then filed at source_ts 0, and as soon as any real timestamp
+// arrived pruneHistory()'s cutoff jumped past it and the caption was deleted -
+// silently losing exactly the caption this branch was meant to rescue.
+//
+// source_ts is seconds since the Unix epoch, the same base the browser clock
+// uses (the harness itself defines Caption Age as client receive time minus
+// source_ts), so elapsed browser time since the last caption that did carry a
+// usable source_ts gives a good estimate. Until the stream clock is known we
+// use the browser's own clock and rebase that guess later (see
+// rebaseEstimatedCaptions), so the estimate can never disagree with the rest of
+// the timeline.
+function estimateSourceTs() {
+  if (anchorSourceTs === null) return Date.now() / 1000;
+  return anchorSourceTs + (Date.now() / 1000 - anchorBrowserTs);
+}
+
 function readCaption(msg) {
   const segment = Number(msg?.segment);
   const revision = Number(msg?.revision);
   const sourceTs = Number(msg?.source_ts);
   if (!Number.isInteger(segment) || segment < 1) return null;
   if (!Number.isInteger(revision) || revision < 1) return null;
+  const timestampUsable = Number.isFinite(sourceTs);
   return {
     segment,
     revision,
-    source_ts: Number.isFinite(sourceTs) ? sourceTs : latestSourceTs, // Might be an issue here if sourceTs is invalid/missing on the first frame
+    source_ts: timestampUsable ? sourceTs : estimateSourceTs(),
+    tsEstimated: !timestampUsable,   // true => age display is approximate
+    needsRebase: !timestampUsable && anchorSourceTs === null,
     final: Boolean(msg.final),
     text: String(msg.text ?? ""),
   };
 }
 
-// Arvid Peter Boisen 2026-10-30
+// Arvid Peter Boisen 2026-10-31
+// The first usable source_ts tells us where the stream clock sits relative to
+// our own clock. Captions we had already guessed at sit on the browser timeline
+// and would otherwise be thousands of seconds away from their real position,
+// which makes them look ancient (pruned instantly) or brand new. Shift those
+// guesses onto the stream timeline. Runs at most once per connection, and only
+// when such guesses exist, so the bounded list walk costs nothing normally.
+function rebaseEstimatedCaptions() {
+  const shift = anchorSourceTs - anchorBrowserTs;
+  if (!Number.isFinite(shift) || shift === 0) return;
+  // finals is walked first: a retained caption is the very same object in
+  // `segments`, and clearing the flag here stops it being shifted twice.
+  for (const caption of finals) {
+    if (!caption.needsRebase) continue;
+    caption.source_ts += shift;
+    caption.needsRebase = false;
+  }
+  for (const caption of segments.values()) {
+    if (!caption.needsRebase) continue;
+    caption.source_ts += shift;
+    caption.needsRebase = false;
+  }
+  for (const remembered of finaled.values()) {
+    if (!remembered.estimated) continue;
+    remembered.source_ts += shift;
+    remembered.estimated = false;
+  }
+}
+
 // A caption is new information only if we do not hold that segment yet, or it
 // is a strictly newer revision of a segment that is not final. A final caption
 // is durable state, so nothing is ever allowed to overwrite it, and an older
@@ -105,17 +178,48 @@ function applyCaption(caption, fromHistory = false) {
       return false;
     }
     counts.replaced += 1;  // newer revision replaces the older one in place
+  } else if (finaled.has(caption.segment)) {
+    // Arvid Peter Boisen 2026-10-31
+    // This caption has left the visible window, so `segments` no longer holds
+    // it, but we did accept its final. Re-adding it would put a finalized
+    // caption back on screen (breaking "no duplicate finals") and would score
+    // as a new update instead of a duplicate, which corrupts the counters we
+    // show as evidence in the demo. A final is durable, so nothing may re-add
+    // it. Genuinely missed older segments are unaffected: they have no entry
+    // here, so a HISTORY gap fill for them is still accepted.
+    const remembered = finaled.get(caption.segment);
+    if (caption.revision === remembered.revision) counts.duplicates += 1;
+    else counts.stale += 1;
+    return false;
   }
 
   counts.updates += 1;
   segments.set(caption.segment, caption);
   if (fromHistory) counts.recovered += 1;
-  latestSourceTs = Math.max(latestSourceTs, caption.source_ts);
+  if (!caption.tsEstimated) {
+    // Only a real source_ts may move the stream clock: a guessed timestamp must
+    // never do so, otherwise one malformed frame could make every other caption
+    // look stale and get it pruned.
+    latestSourceTs = Math.max(latestSourceTs, caption.source_ts);
+    if (anchorSourceTs === null) {
+      anchorSourceTs = caption.source_ts;
+      anchorBrowserTs = Date.now() / 1000;
+      rebaseEstimatedCaptions();   // first real timestamp: fix earlier guesses
+    } else if (caption.source_ts >= anchorSourceTs) {
+      anchorSourceTs = caption.source_ts;
+      anchorBrowserTs = Date.now() / 1000;
+    }
+  }
   lastCaptionAt = Date.now() / 1000;
 
   if (caption.final) {
     finals.push(caption);
     counts.finals += 1;
+    finaled.set(caption.segment, {
+      revision: caption.revision,
+      source_ts: caption.source_ts,
+      estimated: Boolean(caption.needsRebase),
+    });
     // Resume state tracks only the newest finalized segment/revision.
     if (caption.segment > lastFinalSegment ||
         (caption.segment === lastFinalSegment && caption.revision > lastFinalRevision)) {
@@ -155,6 +259,31 @@ function pruneHistory() {
   }
 
   finals = retainedFinals;
+  const overflow = finals.length - LOCAL_HISTORY_MAX_ENTRIES;
+  if (overflow > 0) finals.splice(0, overflow);
+  pruneDedupMemory(cutoff - (DEDUP_RETENTION_SECONDS - LOCAL_HISTORY_SECONDS));
+}
+
+// Arvid Peter Boisen 2026-10-31
+// The dedup record is kept well beyond the visible history window (so a replay
+// from the server's bounded history is always rejected) but is still bounded:
+// entries are dropped once they are older than any history window either side
+// could ever replay, and the map is capped by size if captions arrive faster
+// than that. Dropping the oldest entries only re-opens the duplicate window for
+// segments far older than anything the server can still send.
+function pruneDedupMemory(cutoff) {
+  if (finaled.size <= DEDUP_MAX_ENTRIES) {
+    for (const [segment, remembered] of finaled) {
+      if (remembered.source_ts < cutoff) finaled.delete(segment);
+    }
+    return;
+  }
+  // Insertion order is segment order, so the first keys are the oldest.
+  let excess = finaled.size - DEDUP_MAX_ENTRIES;
+  for (const segment of finaled.keys()) {
+    if (excess-- <= 0) break;
+    finaled.delete(segment);
+  }
 }
 
 
@@ -266,7 +395,9 @@ function renderRecall(seconds) {
     line.className = "recall-row";
     const age = document.createElement("span");
     age.className = "age";
-    age.textContent = `-${Math.max(0, Math.round(latestSourceTs - caption.source_ts))} s`;
+    // A caption whose source_ts had to be estimated gets a "~" so the age is
+    // visibly approximate rather than looking exact.
+    age.textContent = `${caption.tsEstimated ? "~" : ""}-${Math.max(0, Math.round(latestSourceTs - caption.source_ts))} s`;
     const text = document.createElement("span");
     text.textContent = caption.text;
     line.append(age, text);
@@ -274,15 +405,21 @@ function renderRecall(seconds) {
   }
 
   // Be explicit when this tab has less local finalized context than requested,
-  // for example shortly after joining or reconnecting.
-  const oldestFinalTs = finals.length
-    ? Math.min(...finals.map((caption) => caption.source_ts))
-    : latestSourceTs;
+  // for example shortly after joining or reconnecting. The tolerance matters:
+  // the condition used the raw span while the message printed Math.round() of
+  // it, so a 14.6 s span produced the self-contradictory note "Only 15 s of
+  // finalized history is available locally ... to cover the full 15 s".
+  // The oldest timestamp is found with a loop rather than Math.min(...array),
+  // which would spread up to LOCAL_HISTORY_MAX_ENTRIES arguments.
+  let oldestFinalTs = latestSourceTs;
+  for (const caption of finals) {
+    if (caption.source_ts < oldestFinalTs) oldestFinalTs = caption.source_ts;
+  }
   const covered = Math.max(0, latestSourceTs - oldestFinalTs);
-  if (finals.length && covered < recallSeconds) {
+  if (finals.length && oldestFinalTs > cutoff + RECALL_NOTE_TOLERANCE_S) {
     const note = document.createElement("div");
     note.className = "hint";
-    note.textContent = `Only ${Math.round(covered)} s of finalized history is available locally; ` +
+    note.textContent = `Only ${Math.floor(covered)} s of finalized history is available locally; ` +
       `this tab may have joined or reconnected too recently to cover the full ${recallSeconds} s.`;
     recallEl.append(note);
   }
