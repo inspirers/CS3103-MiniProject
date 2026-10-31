@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 Message = Dict[str, Any]
 
 class SourceQueue:
-    def __init__(self, window = 60) -> None:
+    def __init__(self, window: int = 90) -> None:
         self.history: dict[int, Message] = {}
         self.window = window
         self.latest_timestamp: int = 0
@@ -22,7 +22,6 @@ class SourceQueue:
                 return False
 
         self.history[segment] = data
-
         self.latest_timestamp = max(self.latest_timestamp, source_ts)
 
         if self.earliest_timestamp is None:
@@ -35,29 +34,37 @@ class SourceQueue:
         
         return True
 
-    def get_latest(self, window = 60, segment = 0, revision = 0) -> list[Message]:
+    def get_latest(self, window: int = 60, segment: int = 0, revision: int = 0) -> list[Message]:
         result: list[Message] = []
+        highest_seg = max(self.history.keys()) if self.history else None
+
         for seg, data in self.history.items():
             lifetime = self.latest_timestamp - data["source_ts"]
             is_within_window = lifetime <= window
             is_newer_segment = seg > segment
             is_newer_revision_of_same = (seg == segment and data.get("revision", 0) > revision)
-            
-            if data["final"] and is_within_window and (is_newer_segment or is_newer_revision_of_same):
+            is_active_open = (seg == highest_seg and not data.get("final", False)) # Keep the highest non-final segment
+
+            if (data.get("final", False) or is_active_open) and is_within_window and (is_newer_segment or is_newer_revision_of_same):
                 result.append(data)
 
-        return result
+        return sorted(result, key=lambda c: (c["source_ts"], c["segment"]))
 
     def reset(self) -> None:
         self.history.clear()
         self.latest_timestamp = 0
         self.earliest_timestamp = None
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         to_delete: list[int] = []
+        highest_seg = max(self.history.keys()) if self.history else None
+
         for seg, data in self.history.items():
             lifetime = self.latest_timestamp - data["source_ts"]
             if lifetime > self.window:
+                # Preserve the highest non-final segment's highest revision
+                if seg == highest_seg and not data.get("final", False):
+                    continue
                 to_delete.append(seg)
 
         for seg in to_delete:

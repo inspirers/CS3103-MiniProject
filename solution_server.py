@@ -30,6 +30,7 @@ import os
 from typing import Any, Optional
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from data_queue import SourceQueue
 
@@ -59,7 +60,7 @@ BATCH_FINALS = os.environ.get("LIVERECALL_BATCH_FINALS", "1") != "0"
 
 # Connected student clients.
 CLIENTS: set[ClientChannel] = set()
-SOURCEQUEUE: SourceQueue = SourceQueue(60)
+SOURCEQUEUE: SourceQueue = SourceQueue(90)
 
 
 def parse_caption(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -177,7 +178,7 @@ class ClientChannel:
                     continue
                 self.wakeup.clear()
                 await self.wakeup.wait()
-        except websockets.exceptions.ConnectionClosed:
+        except ConnectionClosed:
             pass
 
     def _blocked(self) -> bool:
