@@ -17,6 +17,10 @@ const MAX_EVENT_LINES = 40;
 const DEFAULT_RECALL_SECONDS = 30;  
 const LOCAL_HISTORY_SECONDS = 65;
 const RECALL_WINDOWS = [15, 30, 60];
+// Only complain about a short local history when it is genuinely short, not
+// when it is within a second of the requested window (the caption rate is not
+// perfectly uniform, so the held span jitters around the requested length).
+const RECALL_NOTE_TOLERANCE_S = 1;
 // Deduplication memory has to outlive the visible history. The server can only
 // ever replay captions from inside its own bounded history window, so keeping
 // the finalized revision of every segment we have accepted for longer than any
@@ -52,10 +56,6 @@ let lastFinalRevision = 0;
 let latestSourceTs = 0;      // newest source_ts seen = our idea of "now"
 let lastCaptionAt = 0;       // browser clock when the last caption arrived
 let recallSeconds = DEFAULT_RECALL_SECONDS;  // the recall window currently shown
-// The recall ages are measured in lecture time, so they only move when a newer
-// source_ts arrives. This records the lecture time the recall panel was last
-// rendered at, so the 1 s tick re-renders it only when it actually went stale.
-let recallRenderedAt = 0;
 // Browser-clock anchor taken from the most recent caption that carried a usable
 // source_ts; used to place a caption whose source_ts was missing or invalid.
 let anchorSourceTs = null;
@@ -405,15 +405,21 @@ function renderRecall(seconds) {
   }
 
   // Be explicit when this tab has less local finalized context than requested,
-  // for example shortly after joining or reconnecting.
-  const oldestFinalTs = finals.length
-    ? Math.min(...finals.map((caption) => caption.source_ts))
-    : latestSourceTs;
+  // for example shortly after joining or reconnecting. The tolerance matters:
+  // the condition used the raw span while the message printed Math.round() of
+  // it, so a 14.6 s span produced the self-contradictory note "Only 15 s of
+  // finalized history is available locally ... to cover the full 15 s".
+  // The oldest timestamp is found with a loop rather than Math.min(...array),
+  // which would spread up to LOCAL_HISTORY_MAX_ENTRIES arguments.
+  let oldestFinalTs = latestSourceTs;
+  for (const caption of finals) {
+    if (caption.source_ts < oldestFinalTs) oldestFinalTs = caption.source_ts;
+  }
   const covered = Math.max(0, latestSourceTs - oldestFinalTs);
-  if (finals.length && covered < recallSeconds) {
+  if (finals.length && oldestFinalTs > cutoff + RECALL_NOTE_TOLERANCE_S) {
     const note = document.createElement("div");
     note.className = "hint";
-    note.textContent = `Only ${Math.round(covered)} s of finalized history is available locally; ` +
+    note.textContent = `Only ${Math.floor(covered)} s of finalized history is available locally; ` +
       `this tab may have joined or reconnected too recently to cover the full ${recallSeconds} s.`;
     recallEl.append(note);
   }
