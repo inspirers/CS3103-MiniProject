@@ -1,19 +1,12 @@
 /*
- * Working but deliberately naive LiveRecall browser starter.
- *
- * Provided mechanical behavior:
- *   - opens a WebSocket
- *   - sends CLIENT_HELLO
- *   - visibly appends every received CAPTION_UPDATE
- *   - displays whether an update is provisional/final
- *
- * Graded TODOs:
- *   - replace revisions rather than appending duplicates (Implemented ?)
- *   - maintain >=60 s of finalized local state
- *   - implement 30 s default recall + 15/30/60 s views
- *   - automatic reconnect + correct resume state (Implemented)
- *   - HISTORY merge/deduplication
- *   - usable final UI (Implemented, small fixes remaining after the other stuff is fixed)
+ * LiveRecall browser client
+ *   - opens a WebSocket and sends CLIENT_HELLO with the last final it holds
+ *   - shows one live row per segment; newer revisions replace older ones
+ *   - marks each caption as provisional or final
+ *   - keeps at least 60 s of finalized captions locally
+ *   - offers 30 s default recall with 15/30/60 s views
+ *   - reconnects automatically with backoff and resumes from its last final
+ *   - merges HISTORY into local state without duplicates
  */
 
 const WS_URL = "ws://127.0.0.1:8765";
@@ -475,6 +468,7 @@ function connect(reason = "initial") {
   });
 
   socket.addEventListener("close", () => {
+    if (conn.ws !== socket) return;
     conn.ws = null;
     conn.status = "reconnecting";
     logEvent("connection lost, reconnecting automatically");
@@ -482,6 +476,7 @@ function connect(reason = "initial") {
   });
 
   socket.addEventListener("error", () => {
+    if (conn.ws !== socket) return;
     conn.status = "connection error";
     renderStatus();
   });
