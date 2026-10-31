@@ -24,6 +24,10 @@ const RECALL_WINDOWS = [15, 30, 60];
 // itself stays bounded.
 const DEDUP_RETENTION_SECONDS = 180;
 const DEDUP_MAX_ENTRIES = 2000;
+// Strict size bound on the retained final list. Normally the age cutoff does the
+// pruning; this only matters for a stream that never supplies a usable
+// source_ts, where no age-based cutoff can bound anything.
+const LOCAL_HISTORY_MAX_ENTRIES = 4000;
 
 const statusEl = document.getElementById("status");
 const liveEl = document.getElementById("live");
@@ -48,6 +52,10 @@ let lastFinalRevision = 0;
 let latestSourceTs = 0;      // newest source_ts seen = our idea of "now"
 let lastCaptionAt = 0;       // browser clock when the last caption arrived
 let recallSeconds = DEFAULT_RECALL_SECONDS;  // the recall window currently shown
+// The recall ages are measured in lecture time, so they only move when a newer
+// source_ts arrives. This records the lecture time the recall panel was last
+// rendered at, so the 1 s tick re-renders it only when it actually went stale.
+let recallRenderedAt = 0;
 // Browser-clock anchor taken from the most recent caption that carried a usable
 // source_ts; used to place a caption whose source_ts was missing or invalid.
 let anchorSourceTs = null;
@@ -188,11 +196,20 @@ function applyCaption(caption, fromHistory = false) {
   counts.updates += 1;
   segments.set(caption.segment, caption);
   if (fromHistory) counts.recovered += 1;
-  if (!caption.tsEstimated) {   // only a real source_ts re-anchors the clock
-    anchorSourceTs = caption.source_ts;
-    anchorBrowserTs = Date.now() / 1000;
+  if (!caption.tsEstimated) {
+    // Only a real source_ts may move the stream clock: a guessed timestamp must
+    // never do so, otherwise one malformed frame could make every other caption
+    // look stale and get it pruned.
+    latestSourceTs = Math.max(latestSourceTs, caption.source_ts);
+    if (anchorSourceTs === null) {
+      anchorSourceTs = caption.source_ts;
+      anchorBrowserTs = Date.now() / 1000;
+      rebaseEstimatedCaptions();   // first real timestamp: fix earlier guesses
+    } else if (caption.source_ts >= anchorSourceTs) {
+      anchorSourceTs = caption.source_ts;
+      anchorBrowserTs = Date.now() / 1000;
+    }
   }
-  latestSourceTs = Math.max(latestSourceTs, caption.source_ts);
   lastCaptionAt = Date.now() / 1000;
 
   if (caption.final) {
@@ -201,6 +218,7 @@ function applyCaption(caption, fromHistory = false) {
     finaled.set(caption.segment, {
       revision: caption.revision,
       source_ts: caption.source_ts,
+      estimated: Boolean(caption.needsRebase),
     });
     // Resume state tracks only the newest finalized segment/revision.
     if (caption.segment > lastFinalSegment ||
@@ -241,6 +259,8 @@ function pruneHistory() {
   }
 
   finals = retainedFinals;
+  const overflow = finals.length - LOCAL_HISTORY_MAX_ENTRIES;
+  if (overflow > 0) finals.splice(0, overflow);
   pruneDedupMemory(cutoff - (DEDUP_RETENTION_SECONDS - LOCAL_HISTORY_SECONDS));
 }
 
