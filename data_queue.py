@@ -36,16 +36,15 @@ class SourceQueue:
 
     def get_latest(self, window: int = 60, segment: int = 0, revision: int = 0) -> list[Message]:
         result: list[Message] = []
-        highest_seg = max(self.history.keys()) if self.history else None
 
         for seg, data in self.history.items():
             lifetime = self.latest_timestamp - data["source_ts"]
             is_within_window = lifetime <= window
             is_newer_segment = seg > segment
             is_newer_revision_of_same = (seg == segment and data.get("revision", 0) > revision)
-            is_active_open = (seg == highest_seg and not data.get("final", False)) # Keep the highest non-final segment
 
-            if (data.get("final", False) or is_active_open) and is_within_window and (is_newer_segment or is_newer_revision_of_same):
+            # HISTORY carries finalized captions only.
+            if data.get("final", False) and is_within_window and (is_newer_segment or is_newer_revision_of_same):
                 result.append(data)
 
         return sorted(result, key=lambda c: (c["source_ts"], c["segment"]))

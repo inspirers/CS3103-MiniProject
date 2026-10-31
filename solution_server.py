@@ -40,11 +40,17 @@ MAX_PENDING_SEGMENTS = 256
 LAG_THRESHOLD_S = 0.25
 # Safety cap on frames sent since the last acknowledged ping.
 MAX_UNACKED_FRAMES = 64
+# Ping at most this often, or sooner after this many unacknowledged frames.
+PROBE_INTERVAL_S = 1.0
+PROBE_FRAMES = 16
 # Pacing after lag
 PACE_DRAIN_FRACTION = 0.5
 PACE_DRAIN_FRAMES = 16.0
 PACE_HOLD_FRACTION = 0.8
 PACE_HOLD_S = 60.0
+MIN_PACE_HOLD_S = 10.0
+# Hold seconds per second of ping delay, since retesting costs about one delay.
+PACE_HOLD_PER_LAG = 10.0
 MAX_PACE_HOLD_S = 240.0
 # Lag within this long after a release doubles the next hold.
 PACE_RETEST_S = 30.0
@@ -112,6 +118,7 @@ class ClientChannel:
         self.frames_sent = 0
         self.frames_acked = 0
         self.ping_sent_at: Optional[float] = None
+        self.last_probe_at = 0.0
         self.base_rtt: Optional[float] = None
         self.was_blocked = False
         # (time, frames_acked) at connect or at the previous late pong.
@@ -167,7 +174,7 @@ class ClientChannel:
                 if self.overflowed:
                     await self.ws.close(code=1013, reason="too far behind; reconnect to resume")
                     return
-                if FLOW_CONTROL and self.ping_sent_at is None and self.frames_sent > self.frames_acked:
+                if FLOW_CONTROL and self._probe_due():
                     await self._probe()
                 if self.pending and not self._blocked():
                     delay = self._pace_delay()
@@ -180,6 +187,13 @@ class ClientChannel:
                 await self.wakeup.wait()
         except ConnectionClosed:
             pass
+
+    def _probe_due(self) -> bool:
+        unacked = self.frames_sent - self.frames_acked
+        if self.ping_sent_at is not None or unacked <= 0:
+            return False
+        now = asyncio.get_running_loop().time()
+        return unacked >= PROBE_FRAMES or now - self.last_probe_at >= PROBE_INTERVAL_S
 
     def _blocked(self) -> bool:
         """True while the client has not read what we already sent."""
@@ -247,7 +261,7 @@ class ClientChannel:
     async def _probe(self) -> None:
         """Ping; the pong confirms the client has read every earlier frame."""
         mark = self.frames_sent
-        self.ping_sent_at = asyncio.get_running_loop().time()
+        self.ping_sent_at = self.last_probe_at = asyncio.get_running_loop().time()
         pong_waiter = await self.ws.ping()
         pong_waiter.add_done_callback(lambda fut: self._on_pong(fut, mark))
 
@@ -265,10 +279,13 @@ class ClientChannel:
             # Read rate = frames acked since the last late pong / time elapsed.
             mark_time, mark_acked = self.rate_mark
             if now - mark_time > 1.0 and self.frames_acked > mark_acked:
+                hold = min(max(rtt * PACE_HOLD_PER_LAG, MIN_PACE_HOLD_S), PACE_HOLD_S)
                 if self.released_at is not None and now - self.released_at < PACE_RETEST_S:
                     self.pace_hold_s = min(self.pace_hold_s * 2, MAX_PACE_HOLD_S)
+                elif self.pace_rate > 0:
+                    self.pace_hold_s = max(self.pace_hold_s, hold)  # same lag episode
                 else:
-                    self.pace_hold_s = PACE_HOLD_S
+                    self.pace_hold_s = hold
                 self.pace_rate = (self.frames_acked - mark_acked) / (now - mark_time)
                 self.pace_set_at = now
             self.rate_mark = (now, self.frames_acked)

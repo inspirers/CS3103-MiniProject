@@ -164,12 +164,32 @@ function rebaseEstimatedCaptions() {
   }
 }
 
+// Segment numbers only rise within a lecture, so a used number with a newer
+// timestamp means the source restarted.
+function isNewLecture(caption) {
+  const newestFinal = finaled.get(lastFinalSegment);
+  return !caption.tsEstimated && newestFinal !== undefined &&
+    caption.segment <= lastFinalSegment && caption.source_ts > newestFinal.source_ts;
+}
+
+function resetLecture() {
+  for (const row of rows.values()) row.remove();
+  rows.clear();
+  segments.clear();
+  finaled.clear();
+  finals = [];
+  lastFinalSegment = 0;
+  lastFinalRevision = 0;
+  logEvent("source restarted: cleared the previous lecture");
+}
+
 // A caption is new information only if we do not hold that segment yet, or it
 // is a strictly newer revision of a segment that is not final. A final caption
 // is durable state, so nothing is ever allowed to overwrite it, and an older
 // revision that arrives late is dropped instead of going back on screen.
 // Returns true when the caption was accepted.
 function applyCaption(caption, fromHistory = false) {
+  if (isNewLecture(caption)) resetLecture();
   const held = segments.get(caption.segment);
   if (held) {
     if (held.final || caption.revision <= held.revision) {
