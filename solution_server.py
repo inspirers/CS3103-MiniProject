@@ -41,7 +41,7 @@ LAG_THRESHOLD_S = 0.25
 # Safety cap on frames sent since the last acknowledged ping.
 MAX_UNACKED_FRAMES = 64
 # Ping at most this often, or sooner after this many unacknowledged frames.
-PROBE_INTERVAL_S = 1.0
+PROBE_INTERVAL_S = 0.3
 PROBE_FRAMES = 16
 # Pacing after lag
 PACE_DRAIN_FRACTION = 0.5
@@ -55,6 +55,8 @@ MAX_PACE_HOLD_S = 240.0
 # Lag within this long after a release doubles the next hold.
 PACE_RETEST_S = 30.0
 MIN_PACE_RATE = 0.2  # frames/s
+# Each new measurement can cut the rate by at most this factor.
+PACE_MAX_DROP = 0.75
 # Max finals packed into one catch-up history frame.
 MAX_BATCH_ITEMS = 64
 # Max segments remembered in last_sent.
@@ -282,11 +284,13 @@ class ClientChannel:
                 hold = min(max(rtt * PACE_HOLD_PER_LAG, MIN_PACE_HOLD_S), PACE_HOLD_S)
                 if self.released_at is not None and now - self.released_at < PACE_RETEST_S:
                     self.pace_hold_s = min(self.pace_hold_s * 2, MAX_PACE_HOLD_S)
+                    self.released_at = None  # double once per release
                 elif self.pace_rate > 0:
                     self.pace_hold_s = max(self.pace_hold_s, hold)  # same lag episode
                 else:
                     self.pace_hold_s = hold
-                self.pace_rate = (self.frames_acked - mark_acked) / (now - mark_time)
+                measured = (self.frames_acked - mark_acked) / (now - mark_time)
+                self.pace_rate = max(measured, self.pace_rate * PACE_MAX_DROP)
                 self.pace_set_at = now
             self.rate_mark = (now, self.frames_acked)
         self.wakeup.set()

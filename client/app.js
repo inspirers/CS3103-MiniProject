@@ -168,7 +168,8 @@ function rebaseEstimatedCaptions() {
 // timestamp means the source restarted.
 function isNewLecture(caption) {
   const newestFinal = finaled.get(lastFinalSegment);
-  return !caption.tsEstimated && newestFinal !== undefined &&
+  const stillOpen = segments.get(caption.segment)?.final === false;
+  return !caption.tsEstimated && newestFinal !== undefined && !stillOpen &&
     caption.segment <= lastFinalSegment && caption.source_ts > newestFinal.source_ts;
 }
 
