@@ -2,7 +2,7 @@
 
 | Member | Main responsibilities | Experiments/report sections | Agreed contribution % |
 |---|---|---|---:|
-| Member 1 |  |  |  |
+| Boisen Arvid Peter | client: replace revisions rather than appending duplicates, automatic reconnect + correct resume state, usable final UI | Experiment T1-T3 |  |
 | Member 2 |  |  |  |
 | Member 3 |  |  |  |
 | Member 4 |  |  |  |
