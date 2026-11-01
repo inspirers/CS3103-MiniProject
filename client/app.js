@@ -94,24 +94,9 @@ function numericClientId() {
   return Number(value);
 }
 
-// Arvid Peter Boisen 2026-10-30, timestamp handling fixed 2026-10-31
-// Keep only the protocol fields with the right types. Returning null for a
-// malformed frame means one bad message can never break the UI. A missing or
-// unparseable source_ts is tolerated rather than dropped, because losing a real
-// caption is worse than an approximate age.
-//
-// It used to fall back to `latestSourceTs`, which is 0 for the very first frame.
-// The caption was then filed at source_ts 0, and as soon as any real timestamp
-// arrived pruneHistory()'s cutoff jumped past it and the caption was deleted -
-// silently losing exactly the caption this branch was meant to rescue.
-//
-// source_ts is seconds since the Unix epoch, the same base the browser clock
-// uses (the harness itself defines Caption Age as client receive time minus
-// source_ts), so elapsed browser time since the last caption that did carry a
-// usable source_ts gives a good estimate. Until the stream clock is known we
-// use the browser's own clock and rebase that guess later (see
-// rebaseEstimatedCaptions), so the estimate can never disagree with the rest of
-// the timeline.
+// Arvid Peter Boisen 2026-10-30
+// Reject malformed frames, but tolerate a missing source_ts by estimating it
+// from elapsed browser time (and rebasing early guesses once the stream clock is known).
 function estimateSourceTs() {
   if (anchorSourceTs === null) return Date.now() / 1000;
   return anchorSourceTs + (Date.now() / 1000 - anchorBrowserTs);
@@ -136,12 +121,9 @@ function readCaption(msg) {
 }
 
 // Arvid Peter Boisen 2026-10-31
-// The first usable source_ts tells us where the stream clock sits relative to
-// our own clock. Captions we had already guessed at sit on the browser timeline
-// and would otherwise be thousands of seconds away from their real position,
-// which makes them look ancient (pruned instantly) or brand new. Shift those
-// guesses onto the stream timeline. Runs at most once per connection, and only
-// when such guesses exist, so the bounded list walk costs nothing normally.
+// Once the first valid source_ts arrives, shift any earlier browser-clock
+// estimates onto the stream timeline so clock skew doesn't make them look
+// ancient (and pruned immediately) or brand new. Runs at most once per connection.
 function rebaseEstimatedCaptions() {
   const shift = anchorSourceTs - anchorBrowserTs;
   if (!Number.isFinite(shift) || shift === 0) return;
@@ -201,13 +183,9 @@ function applyCaption(caption, fromHistory = false) {
     counts.replaced += 1;  // newer revision replaces the older one in place
   } else if (finaled.has(caption.segment)) {
     // Arvid Peter Boisen 2026-10-31
-    // This caption has left the visible window, so `segments` no longer holds
-    // it, but we did accept its final. Re-adding it would put a finalized
-    // caption back on screen (breaking "no duplicate finals") and would score
-    // as a new update instead of a duplicate, which corrupts the counters we
-    // show as evidence in the demo. A final is durable, so nothing may re-add
-    // it. Genuinely missed older segments are unaffected: they have no entry
-    // here, so a HISTORY gap fill for them is still accepted.
+    // This segment was already finalized and pruned from `segments`. Reject it so
+    // replayed finals aren't shown twice or miscounted as new updates. Genuinely
+    // missed segments have no entry in `finaled`, so HISTORY gap-fills still work.
     const remembered = finaled.get(caption.segment);
     if (caption.revision === remembered.revision) counts.duplicates += 1;
     else counts.stale += 1;
@@ -286,12 +264,9 @@ function pruneHistory() {
 }
 
 // Arvid Peter Boisen 2026-10-31
-// The dedup record is kept well beyond the visible history window (so a replay
-// from the server's bounded history is always rejected) but is still bounded:
-// entries are dropped once they are older than any history window either side
-// could ever replay, and the map is capped by size if captions arrive faster
-// than that. Dropping the oldest entries only re-opens the duplicate window for
-// segments far older than anything the server can still send.
+// Keep dedup records outliving the server's replay window so replayed finals are
+// always rejected, while bounding memory by both age and max size. Any pruned
+// entry is already too old for the server to ever resend.
 function pruneDedupMemory(cutoff) {
   if (finaled.size <= DEDUP_MAX_ENTRIES) {
     for (const [segment, remembered] of finaled) {
