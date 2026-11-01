@@ -34,9 +34,11 @@ from websockets.exceptions import ConnectionClosed
 
 from data_queue import SourceQueue
 
-# Max segments queued per client (one entry per segment).
-MAX_PENDING_SEGMENTS = 256
-# Client is lagging once a ping waits this long beyond its base RTT.
+# Max unsent messages queued per client.
+MAX_PENDING_MESSAGES = 2048
+# Client is overloaded once a queued message has waited this long.
+OVERLOAD_AGE_S = 1.0
+# Pause sending once a ping waits this long beyond its base RTT.
 LAG_THRESHOLD_S = 0.25
 # Safety cap on frames sent since the last acknowledged ping.
 MAX_UNACKED_FRAMES = 64
@@ -64,7 +66,7 @@ SENT_STATE_SEGMENTS = 512
 
 # Experiment toggles via env vars, e.g. LIVERECALL_FLOW_CONTROL=0 python run_demo.py ...
 FLOW_CONTROL = os.environ.get("LIVERECALL_FLOW_CONTROL", "1") != "0"
-BATCH_FINALS = os.environ.get("LIVERECALL_BATCH_FINALS", "1") != "0"
+BATCH_FINALS = FLOW_CONTROL and os.environ.get("LIVERECALL_BATCH_FINALS", "1") != "0"
 
 # Connected student clients.
 CLIENTS: set[ClientChannel] = set()
@@ -107,8 +109,10 @@ class ClientChannel:
         self.ws = ws
         self.client_id = client_id
         self.history_frame = json.dumps({"type": "HISTORY", "items": history})
-        # segment -> (revision, final, caption, frame), oldest segment first.
-        self.pending: dict[int, tuple[int, bool, dict[str, Any], str]] = {}
+        # segment -> unsent (revision, final, caption, frame, queued_at), oldest first.
+        self.pending: dict[int, list[tuple[int, bool, dict[str, Any], str, float]]] = {}
+        self.queued = 0
+        self.overloaded = False
         # segment -> highest revision already sent.
         self.last_sent: dict[int, int] = {}
         for item in history:
@@ -122,7 +126,6 @@ class ClientChannel:
         self.ping_sent_at: Optional[float] = None
         self.last_probe_at = 0.0
         self.base_rtt: Optional[float] = None
-        self.was_blocked = False
         # (time, frames_acked) at connect or at the previous late pong.
         self.rate_mark = (asyncio.get_running_loop().time(), 0)
 
@@ -138,34 +141,64 @@ class ClientChannel:
         self.batches = 0
         self.lag_events = 0
 
-    def enqueue(self, caption: dict[str, Any], frame: str) -> None:
+    def enqueue(self, caption: dict[str, Any], frame: str, now: float) -> None:
         segment = caption["segment"]
         revision = caption["revision"]
         if revision <= self.last_sent.get(segment, 0):
             return  # already sent this revision or a newer one
-        queued = self.pending.get(segment)
-        if queued is not None:
-            queued_revision, queued_final, _, _ = queued
-            if queued_final or revision <= queued_revision:
-                return  # never replace a final or a newer revision
-            self.coalesced += 1  # newer revision replaces the unsent older one
-        elif len(self.pending) >= MAX_PENDING_SEGMENTS:
+        if self.queued >= MAX_PENDING_MESSAGES:
             self._shed()
             if self.overflowed:
                 return
-        self.pending[segment] = (revision, caption["final"], caption, frame)
+        queue = self.pending.setdefault(segment, [])
+        if queue:
+            if queue[-1][1] or revision <= queue[-1][0]:
+                return  # never replace a final or a newer revision
+            if self._degraded():
+                self.coalesced += len(queue)  # newer revision replaces unsent older ones
+                self.queued -= len(queue)
+                queue.clear()
+        queue.append((revision, caption["final"], caption, frame, now))
+        self.queued += 1
+        self._check_overload(now)
         self.wakeup.set()
 
     def reset(self) -> None:
         self.pending.clear()
+        self.queued = 0
         self.last_sent.clear()
 
+    def _degraded(self) -> bool:
+        return self.overloaded or self.pace_rate > 0
+
+    def _check_overload(self, now: float) -> None:
+        """Drop old revisions only once a queued message has waited too long."""
+        if self.overloaded or not self.pending:
+            return
+        oldest_queued_at = next(iter(self.pending.values()))[0][4]
+        if now - oldest_queued_at > OVERLOAD_AGE_S:
+            self.overloaded = True
+            self.lag_events += 1
+            self._compact()
+
+    def _compact(self) -> None:
+        """Keep only the newest unsent revision of each segment."""
+        for queue in self.pending.values():
+            dropped = len(queue) - 1
+            del queue[:-1]
+            self.coalesced += dropped
+            self.queued -= dropped
+
     def _shed(self) -> None:
-        """Queue full: drop provisionals; if still full of finals, close the client."""
-        for segment in [s for s, entry in self.pending.items() if not entry[1]]:
+        """Queue full: drop old revisions, then provisionals, then close the client."""
+        self._compact()
+        if self.queued < MAX_PENDING_MESSAGES:
+            return
+        for segment in [s for s, queue in self.pending.items() if not queue[-1][1]]:
             del self.pending[segment]
             self.coalesced += 1
-        if len(self.pending) >= MAX_PENDING_SEGMENTS:
+            self.queued -= 1
+        if self.queued >= MAX_PENDING_MESSAGES:
             self.overflowed = True
             self.wakeup.set()
 
@@ -178,6 +211,7 @@ class ClientChannel:
                     return
                 if FLOW_CONTROL and self._probe_due():
                     await self._probe()
+                self._check_overload(asyncio.get_running_loop().time())
                 if self.pending and not self._blocked():
                     delay = self._pace_delay()
                     if delay > 0:
@@ -202,13 +236,8 @@ class ClientChannel:
         if not FLOW_CONTROL or self.ping_sent_at is None:
             return False
         waited = asyncio.get_running_loop().time() - self.ping_sent_at
-        if (waited - (self.base_rtt or 0.0) > LAG_THRESHOLD_S
-                or self.frames_sent - self.frames_acked >= MAX_UNACKED_FRAMES):
-            if not self.was_blocked:
-                self.lag_events += 1
-            self.was_blocked = True
-            return True
-        return False
+        return (waited - (self.base_rtt or 0.0) > LAG_THRESHOLD_S
+                or self.frames_sent - self.frames_acked >= MAX_UNACKED_FRAMES)
 
     def _rate_limit(self, now: float) -> float:
         """Current frames/s allowed for this client (0 = unpaced)."""
@@ -235,29 +264,34 @@ class ClientChannel:
         return self.last_write_at + 1.0 / limit - now
 
     async def _send_next(self) -> None:
-        # While lagging or paced, send all backlogged finals in one HISTORY frame.
-        degraded = self.was_blocked or self.pace_rate > 0
-        finals = [entry for entry in self.pending.values() if entry[1]]
-        if len(finals) < 2:
-            self.was_blocked = False  # backlog flushed
-        if BATCH_FINALS and degraded and len(finals) >= 2:
+        # While overloaded or paced, send all backlogged finals in one HISTORY frame.
+        items = 1
+        finals = [queue[-1] for queue in self.pending.values() if queue[-1][1]]
+        if BATCH_FINALS and self._degraded() and len(finals) >= 2:
             batch = finals[:MAX_BATCH_ITEMS]
-            for revision, _, caption, _ in batch:
-                del self.pending[caption["segment"]]
+            for revision, _, caption, _, _ in batch:
+                queue = self.pending.pop(caption["segment"])
+                self.coalesced += len(queue) - 1
+                self.queued -= len(queue)
                 self._mark_sent(caption["segment"], revision)
             self.batches += 1
-            await self._write(json.dumps(
-                {"type": "HISTORY", "items": [entry[2] for entry in batch]}))
-            return
+            frame = json.dumps({"type": "HISTORY", "items": [entry[2] for entry in batch]})
+            items = len(batch)
+        else:
+            segment = next(iter(self.pending))
+            queue = self.pending[segment]
+            revision, _, _, frame, _ = queue.pop(0)
+            self.queued -= 1
+            if not queue:
+                del self.pending[segment]
+            self._mark_sent(segment, revision)
+        if not self.pending:
+            self.overloaded = False  # backlog flushed
+        await self._write(frame, items)
 
-        segment = next(iter(self.pending))
-        revision, _, _, frame = self.pending.pop(segment)
-        self._mark_sent(segment, revision)
-        await self._write(frame)
-
-    async def _write(self, frame: str) -> None:
+    async def _write(self, frame: str, items: int = 1) -> None:
         await self.ws.send(frame)
-        self.frames_sent += 1
+        self.frames_sent += items  # count batched captions so rate is not underestimated
         self.last_write_at = asyncio.get_running_loop().time()
 
     async def _probe(self) -> None:
@@ -277,10 +311,11 @@ class ClientChannel:
             self.base_rtt = rtt if self.base_rtt is None else min(self.base_rtt, rtt)
         self.frames_acked = max(self.frames_acked, mark)
         self.ping_sent_at = None
+        self._check_overload(now)
         if late:
             # Read rate = frames acked since the last late pong / time elapsed.
             mark_time, mark_acked = self.rate_mark
-            if now - mark_time > 1.0 and self.frames_acked > mark_acked:
+            if self._degraded() and now - mark_time > 1.0 and self.frames_acked > mark_acked:
                 hold = min(max(rtt * PACE_HOLD_PER_LAG, MIN_PACE_HOLD_S), PACE_HOLD_S)
                 if self.released_at is not None and now - self.released_at < PACE_RETEST_S:
                     self.pace_hold_s = min(self.pace_hold_s * 2, MAX_PACE_HOLD_S)
@@ -307,8 +342,9 @@ class ClientChannel:
 def fan_out(caption: dict[str, Any]) -> None:
     """Hand one accepted update to every client without awaiting any of them."""
     frame = json.dumps(caption, separators=(",", ":"))
+    now = asyncio.get_running_loop().time()
     for channel in CLIENTS:
-        channel.enqueue(caption, frame)
+        channel.enqueue(caption, frame, now)
 
 
 def reset_lecture() -> None:
@@ -404,9 +440,9 @@ async def report_stats(interval: float) -> None:
         channels = list(CLIENTS)
         print(
             f"stats: clients={len(channels)} "
-            f"pending_total={sum(len(c.pending) for c in channels)} "
-            f"pending_max={max(len(c.pending) for c in channels)} "
-            f"lagging_now={sum(c.was_blocked for c in channels)} "
+            f"pending_total={sum(c.queued for c in channels)} "
+            f"pending_max={max(c.queued for c in channels)} "
+            f"lagging_now={sum(c.overloaded for c in channels)} "
             f"paced_now={sum(c.pace_rate > 0 for c in channels)} "
             f"lag_events={sum(c.lag_events for c in channels)} "
             f"coalesced={sum(c.coalesced for c in channels)} "
