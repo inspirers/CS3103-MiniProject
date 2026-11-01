@@ -11,13 +11,13 @@ Exact commands from a fresh Ubuntu environment.
 
 ```console
 # apt update
-# apt install -y python3 python3-venv python3-pip iproute2
+# apt install -y python3 python3-venv python3-pip iproute2 python-is-python3
 ```
 
 ## Install
 
 ```console
-$ python3 -m venv venv
+$ python -m venv venv
 $ source venv/bin/activate
 $ pip install -r requirements.txt
 ```
