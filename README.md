@@ -1,30 +1,39 @@
-# Team XX - LiveRecall
+# Team 27 - LiveRecall
 
 ## Team members
 
+- Boisen Arvid Peter / A0360356E / client: replace revisions rather than appending duplicates, automatic reconnect + correct resume state, usable final UI
 - Name / student ID / responsibility
 
 ## Ubuntu setup
 
 Exact commands from a fresh Ubuntu environment.
 
+```console
+# apt update
+# apt install -y python3 python3-venv python3-pip iproute2
+```
+
 ## Install
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+```console
+$ python3 -m venv venv
+$ source venv/bin/activate
+$ pip install -r requirements.txt
 ```
 
 ## Required server
 
-```bash
-python solution_server.py --port 8765
+```console
+$ python solution_server.py --port 8765
 ```
 
 ## Browser client
 
 Exact commands/steps.
+```console
+$ python -m http.server 8000 --directory client
+```
 
 ## Public deterministic tests
 
