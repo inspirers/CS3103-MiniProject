@@ -27,12 +27,13 @@ import argparse
 import asyncio
 import json
 import os
-from typing import Any, Optional
+from typing import Any, Optional, TypeAlias
 
 import websockets
 from websockets.exceptions import ConnectionClosed
 
 from data_queue import SourceQueue
+from message_types import CaptionUpdate
 
 # Max unsent messages queued per client.
 MAX_PENDING_MESSAGES = 2048
@@ -64,16 +65,18 @@ MAX_BATCH_ITEMS = 64
 # Max segments remembered in last_sent.
 SENT_STATE_SEGMENTS = 512
 
+HISTORY_WINDOW = 90
+
 # Experiment toggles via env vars, e.g. LIVERECALL_FLOW_CONTROL=0 python run_demo.py ...
 FLOW_CONTROL = os.environ.get("LIVERECALL_FLOW_CONTROL", "1") != "0"
 BATCH_FINALS = FLOW_CONTROL and os.environ.get("LIVERECALL_BATCH_FINALS", "1") != "0"
 
 # Connected student clients.
 CLIENTS: set[ClientChannel] = set()
-SOURCEQUEUE: SourceQueue = SourceQueue(90)
+SOURCEQUEUE: SourceQueue = SourceQueue(HISTORY_WINDOW)
 
 
-def parse_caption(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
+def parse_caption(msg: dict[str, Any]) -> Optional[CaptionUpdate]:
     """Return a caption with only the protocol fields, or None if malformed."""
     try:
         segment = int(msg["segment"])
@@ -100,17 +103,18 @@ def int_field(msg: dict[str, Any], name: str, default: int) -> int:
         return max(0, int(msg.get(name, default)))
     except (TypeError, ValueError, OverflowError):
         return default
-
-
+    
+# (revision, final, caption, frame, queued_at)
+PendingCaption: TypeAlias = tuple[int, bool, CaptionUpdate, str, float]
 class ClientChannel:
     """Bounded coalescing outbound queue plus sender task for one client."""
 
-    def __init__(self, ws, client_id, history: list[dict[str, Any]]) -> None:
+    def __init__(self, ws, client_id, history: list[CaptionUpdate]) -> None:
         self.ws = ws
         self.client_id = client_id
         self.history_frame = json.dumps({"type": "HISTORY", "items": history})
         # segment -> unsent (revision, final, caption, frame, queued_at), oldest first.
-        self.pending: dict[int, list[tuple[int, bool, dict[str, Any], str, float]]] = {}
+        self.pending: dict[int, list[PendingCaption]] = {}
         self.queued = 0
         self.overloaded = False
         # segment -> highest revision already sent.
@@ -141,7 +145,7 @@ class ClientChannel:
         self.batches = 0
         self.lag_events = 0
 
-    def enqueue(self, caption: dict[str, Any], frame: str, now: float) -> None:
+    def enqueue(self, caption: CaptionUpdate, frame: str, now: float) -> None:
         segment = caption["segment"]
         revision = caption["revision"]
         if revision <= self.last_sent.get(segment, 0):
@@ -408,6 +412,9 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
         # Keep the WebSocket open until the client disconnects.
         async for _ in ws:
             pass
+    except (ConnectionClosed, ConnectionResetError, OSError):
+        # Prevent traceback from bubbling up during connection failure
+        pass
     finally:
         CLIENTS.discard(channel)
         sender.cancel()
@@ -418,7 +425,7 @@ async def handler(ws) -> None:
     try:
         raw = await asyncio.wait_for(ws.recv(), timeout=5)
         hello = json.loads(raw)
-    except (asyncio.TimeoutError, ValueError):
+    except (asyncio.TimeoutError, ValueError, ConnectionClosed):
         await ws.close(code=1008, reason="Expected a valid hello message")
         return
 
