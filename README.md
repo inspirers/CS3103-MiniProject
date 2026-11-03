@@ -11,7 +11,7 @@ Exact commands from a fresh Ubuntu environment.
 
 ```console
 # apt update
-# apt install -y python3 python3-venv python3-pip iproute2 python-is-python3
+# apt install -y python3 python3-venv python3-pip iproute2 python-is-python3 python3-websockets
 ```
 
 ## Install
@@ -19,7 +19,7 @@ Exact commands from a fresh Ubuntu environment.
 ```console
 $ python -m venv venv
 $ source venv/bin/activate
-$ pip install -r requirements.txt
+$ python -m pip install -r requirements.txt
 ```
 
 ## Required server

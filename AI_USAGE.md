@@ -16,3 +16,4 @@ Include a short generated suggestion/code fragment or precise description, expla
 ## Responsibility statement
 
 We understand that the team remains responsible for the submitted code, experimental results, and claims, and that every member may be asked to explain or modify relevant code during the viva.
+The project team assumes sole risk and liability for the integration, compilation, and execution of any AI-generated assets. Under no circumstances shall the model developers, framework maintainers, or hosting infrastructure providers be held liable for any direct, indirect, incidental, consequential, or performance-related damages, system failures, runtime errors, or academic/operational penalties arising from the use or misapplication of synthesized code within this project.
