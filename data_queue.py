@@ -6,9 +6,11 @@ from typing import Any, Dict, Optional
 Message = Dict[str, Any]
 
 class SourceQueue:
-    def __init__(self, window: int = 90) -> None:
+    def __init__(self, window: int = 90, max_segments: int = 4096) -> None:
         self.history: dict[int, Message] = {}
         self.window = window
+        # Hard cap, so history stays bounded even if source_ts stops advancing.
+        self.max_segments = max_segments
         self.latest_timestamp: int = 0
         self.earliest_timestamp: Optional[int] = None
 
@@ -31,7 +33,12 @@ class SourceQueue:
 
         if self.latest_timestamp - self.earliest_timestamp > 2 * self.window:
             self.cleanup()
-        
+
+        if len(self.history) > self.max_segments:
+            while len(self.history) > self.max_segments:
+                del self.history[next(iter(self.history))]  # oldest segment first
+            self.earliest_timestamp = min(d["source_ts"] for d in self.history.values())
+
         return True
 
     def get_latest(self, window: int = 60, segment: int = 0, revision: int = 0) -> list[Message]:

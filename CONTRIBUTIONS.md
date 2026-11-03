@@ -3,7 +3,7 @@
 | Member | Main responsibilities | Experiments/report sections | Agreed contribution % |
 |---|---|---|---:|
 | Boisen Arvid Peter | client: replace revisions rather than appending duplicates, automatic reconnect + correct resume state, usable final UI | Experiment T1-T3 |  |
-| Member 2 |  |  |  |
+| Lee Jin Timothy | bounded per-client application queues, slow-client isolation, semantic coalescing / backpressure | Batching and flow control test | 25% |
 | Member 3 |  |  |  |
 | Member 4 |  |  |  |
 

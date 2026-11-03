@@ -150,11 +150,7 @@ class ClientChannel:
         revision = caption["revision"]
         if revision <= self.last_sent.get(segment, 0):
             return  # already sent this revision or a newer one
-        if self.queued >= MAX_PENDING_MESSAGES:
-            self._shed()
-            if self.overflowed:
-                return
-        queue = self.pending.setdefault(segment, [])
+        queue = self.pending.get(segment)
         if queue:
             if queue[-1][1] or revision <= queue[-1][0]:
                 return  # never replace a final or a newer revision
@@ -162,7 +158,11 @@ class ClientChannel:
                 self.coalesced += len(queue)  # newer revision replaces unsent older ones
                 self.queued -= len(queue)
                 queue.clear()
-        queue.append((revision, caption["final"], caption, frame, now))
+        if self.queued >= MAX_PENDING_MESSAGES:
+            self._shed(segment)
+            if self.overflowed:
+                return
+        self.pending.setdefault(segment, []).append((revision, caption["final"], caption, frame, now))
         self.queued += 1
         self._check_overload(now)
         self.wakeup.set()
@@ -193,12 +193,15 @@ class ClientChannel:
             self.coalesced += dropped
             self.queued -= dropped
 
-    def _shed(self) -> None:
+    def _shed(self, incoming: int) -> None:
         """Queue full: drop old revisions, then provisionals, then close the client."""
+        for segment in [s for s, queue in self.pending.items() if not queue]:
+            del self.pending[segment]  # emptied by a replacement that is about to be added back
         self._compact()
         if self.queued < MAX_PENDING_MESSAGES:
             return
-        for segment in [s for s, queue in self.pending.items() if not queue[-1][1]]:
+        active = max([*self.pending, incoming])  # keep the active segment's newest revision
+        for segment in [s for s, queue in self.pending.items() if not queue[-1][1] and s != active]:
             del self.pending[segment]
             self.coalesced += 1
             self.queued -= 1

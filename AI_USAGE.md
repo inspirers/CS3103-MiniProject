@@ -3,7 +3,7 @@
 ## Tools used
 
 Qwen 3.8 Flash Next from Alibaba locally hosted on laptop. (Arvid)
-Qwen from Alibaba was used to check for bugs, code improvement and assist with code development.
+Qwen from Alibaba and Claude Code were used to check for bugs, code improvement and assist with code development.
 
 ## One useful suggestion
 
