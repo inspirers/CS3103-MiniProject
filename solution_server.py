@@ -387,12 +387,9 @@ async def handle_source(ws, hello: dict[str, Any]) -> None:
                 if SOURCEQUEUE.add(caption):
                     fan_out(caption)
             elif msg_type == "SOURCE_DONE":
-                # Test-control message. The specification does not require it
-                # to be forwarded to clients.
                 print("source finished", flush=True)
             else:
-                # Forward compatibility: ignore fields/messages this baseline
-                # doesn't understand rather than crashing.
+                # Forward compatibility
                 continue
     finally:
         print("source disconnected", flush=True)
@@ -411,7 +408,7 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
     sender = asyncio.create_task(channel.run())
     print(f"client connected: id={client_id}; clients={len(CLIENTS)}", flush=True)
     try:
-        # Student clients normally don't send further messages after hello.
+        # Student clients normally do not send further messages after hello.
         # Keep the WebSocket open until the client disconnects.
         async for _ in ws:
             pass

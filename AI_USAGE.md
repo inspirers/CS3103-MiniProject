@@ -12,7 +12,7 @@ Timothy: Claude Code was used to check for bugs, code improvement and assist wit
 
 ## One useful suggestion
 
-Describe one suggestion that materially helped the project and how you verified it.
+Early on, our bounded per-client queue never seemed to do anything. Slow readers never filled it, and no revisions were ever coalesced. Claude Code pointed out that the OS’s TCP send and receive buffers were accepting everything we wrote, which hid slow clients from the server. It suggested using WebSocket ping/pong timing to detect when a client stops reading. We verified this with the server’s stats counters. Before the change, coalescing and lag events stayed at zero in the slow-reader test (T3). After it, slow clients triggered lag detection and their old revisions were coalesced, while normal clients still received every revision and completeness stayed at 100%.
 
 ## One suggestion that was wrong, inefficient, or required modification
 
