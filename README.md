@@ -12,8 +12,8 @@
 <!-- Exact commands from a fresh Ubuntu environment. -->
 
 ```console
-# apt update
-# apt install -y python3 python3-venv python3-pip iproute2 python-is-python3 python3-websockets
+# sudo apt update
+# sudo apt install -y python3 python3-venv python3-pip iproute2 python-is-python3 python3-websockets
 ```
 
 ## Install
