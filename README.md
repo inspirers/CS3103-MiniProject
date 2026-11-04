@@ -3,7 +3,7 @@
 ## Team members
 
 - Boisen Arvid Peter / A0360356E / client: replace revisions rather than appending duplicates, automatic reconnect + correct resume state, usable final UI
-- Name / student ID / responsibility
+- Lee Jin Timothy / A0309324J / bounded per-client application queues, slow-client isolation, semantic coalescing / backpressure
 
 ## Ubuntu setup
 
@@ -144,24 +144,24 @@ To test how the server and client handle rate limits, delay/jitter, packet loss,
 
 ### Revision and deduplication state
 The server maintains a dictionary containing the most recent revisions of each segment, as well as whether each segment is final or not. Whenever the server receives a new `CAPTION_UPDATE` from the source, it drops the update if:
-* A more recent revision of the same segment has already been stored.
+* The same or a newer revision of that segment has already been stored.
 * The segment has already been marked as final.
 
 On the client side, the browser maintains three related data structures: a `segments` map containing the latest accepted revision of each segment, a rolling `finals` list for recall, and a `rows` map connecting segments to their rendered DOM elements. All live and recovered captions pass through the same `applyCaption()` function, preventing `HISTORY` recovery from bypassing the normal revision and deduplication rules. The client keeps one row per segment on screen, so a newer revision simply replaces the older text in place. Once a segment is marked as final, it can never be overwritten, and any older (stale) or repeated (duplicate) revisions that arrive late are ignored.
 
-Although the client cleans up visible finalized captions after 65 seconds to save memory, it remembers which segments were already finalized in a `finaled` deduplication map for 180 seconds. Since this is longer than the server's 60-second history window, an old final caption that was already cleaned up from the screen can never be added again after a reconnect. Furthermore, the resume high-water mark (`lastFinalSegment` and `lastFinalRevision`) is not reduced when old local history is pruned, ensuring that reconnecting clients do not incorrectly request already-processed older segments.
+Although the client cleans up visible finalized captions after 65 seconds to save memory, it remembers which segments were already finalized in a `finaled` deduplication map for 180 seconds. Since this is longer than the server's history window (90 s stored, at most 60 s served), an old final caption that was already cleaned up from the screen can never be added again after a reconnect. Furthermore, the resume high-water mark (`lastFinalSegment` and `lastFinalRevision`) is not reduced when old local history is pruned, ensuring that reconnecting clients do not incorrectly request already-processed older segments.
 
 
 ### Bounded server history
 
-Whenever the server receives a `CLIENT_HELLO`, it provides the history of the latest or final revisions of each segment up to the specified window determined by the `history_seconds` field, bounded up to 60 seconds in local memory.
+The server keeps the latest revision of each segment for the last 90 seconds (capped at 4096 segments). Whenever it receives a `CLIENT_HELLO`, it replies with a `HISTORY` frame containing only finalized captions newer than the client's `last_segment`/`last_revision`, within `history_seconds` (capped at 60), ordered oldest first.
 
 On the browser side, to support the "What did I miss?" recall feature, the client retains the latest 65 seconds of finalized captions (selected over an exact 60-second window to provide a small margin for timestamp rounding and uneven caption intervals). After each accepted caption, the client calculates `cutoff = latest source timestamp − 65 seconds`. Finalized captions older than the cutoff are removed from the rolling list, segment map, and displayed transcript, whereas provisional captions are retained because they may still receive newer revisions.
 
 The recall interface supports 15, 30, and 60-second windows (with 30 seconds selected by default) and is performed entirely from local client state without generating new WebSocket requests when switching views. The client filters only finalized captions whose `source_ts` falls inside the selected window and orders them from oldest to newest, while also reporting when the client has insufficient local history (such as shortly after a late join).
 
 ### Reconnect and late-join recovery
-To prevent overloading the server during recovery, the client implements exponential backoff with jitter when scheduling reconnection attempts. Without randomized delays, a server outage or network interruption would cause all disconnected clients to retry simultaneously. In `scheduleReconnect()`, the base backoff scales exponentially (`RECONNECT_MIN_MS` * 2^exp, capped at an exponent of 10 and bounded by `RECONNECT_MAX_MS`) and is multiplied by a random jitter factor between 0.75 and 1.25 (± 25%). This distributes reconnection requests evenly over time, protecting the server from traffic spikes as it comes back online.
+To prevent overloading the server during recovery, the client implements exponential backoff with jitter when scheduling reconnection attempts. Without randomized delays, a server outage or network interruption would cause all disconnected clients to retry simultaneously. In `scheduleReconnect()`, the base backoff scales exponentially (`RECONNECT_MIN_MS` * 2^exp, capped at an exponent of 10 and bounded by `RECONNECT_MAX_MS`) and is multiplied by a random jitter factor between 0.75 and 1.25 (± 25%). This spreads reconnection requests out over time, protecting the server from traffic spikes as it comes back online.
 
 On every initial connection or reconnect, the client sends the most recent finalized segment and revision in `CLIENT_HELLO` and requests 60 seconds of recovery history. Requesting 60 seconds upfront ensures that all recall-window options (15, 30, and 60 seconds) can be populated locally after a late join or disconnection without needing another server request when the user switches views.
 
@@ -169,18 +169,18 @@ When a `HISTORY` message arrives, the client validates that the response contain
 
 ### Per-client buffering and backpressure policy
 
-Each client has its own bounded queue and sender task, so a slow client only delays itself. The queue holds at most one unsent message per segment, which means a newer revision replaces an older one that has not gone out yet, while final captions are never replaced. TCP’s buffers accepted everything we sent, so the queue never filled up and nothing was coalesced. To fix this, the server now pings each client after sending. If a reply comes back more than 250 ms later than usual, we stop writing to that client and let its backlog collect on the server, where old revisions can be discarded. We then measure how fast the client really reads and pace it below that rate, sending any waiting finals together in one `HISTORY` message. Clients that keep up never trigger any of this and still receive every revision. If a client falls so far behind that its queue fills with 256 finals, we disconnect it so that it can reconnect and catch up through `HISTORY`.
+Each client has its own bounded queue and sender task, so a slow client only delays itself. While a client keeps up, it receives every revision in order. If its oldest queued message has waited over 1 s, the client is marked overloaded: we keep only the newest unsent revision of each segment, and a final is never replaced. TCP's buffers originally hid slow clients, so the server also pings each client every 0.3 s or after 16 unacknowledged frames. If a pong arrives more than 250 ms later than the client's usual round-trip time, or 64 frames are unacknowledged, we stop writing and let the backlog collect on the server, where old revisions are discarded. From the frames acknowledged between late pongs, we measure the client's real read rate and pace it at 50% of that rate to drain the backlog, then 80% for 10–60 s. While a client is overloaded or paced, its waiting finals are sent together in one `HISTORY` message of up to 64 items. If its queue still holds 2048 messages after dropping all old revisions and provisionals, we close the connection (code 1013) so it can reconnect and catch up through `HISTORY`.
 
 ### Overload behavior and trade-offs
 To handle severe overload and degraded states, the server relies on two main optimizations:
-1. **Flow control:** Monitors client responsiveness via ping probing to detect sudden bursts of lag when RTT exceeds the baseline threshold, and estimates how much data can reach the client based on the time between pong responses and the amount of data sent between corresponding pings.
+1. **Flow control:** Monitors client responsiveness via ping probing to detect sudden bursts of lag when RTT exceeds the baseline threshold, and estimates how much data can reach the client from the number of frames acknowledged between late pongs and the time between them.
 2. **Batch History:** Bundles multiple backlog updates into a single `HISTORY` frame when a client is severely overloaded and in a degraded state, significantly reducing framing overhead and maximizing data transfer when the sending rate is restricted.
 
 Under harsh network conditions, there is a fundamental trade-off between message **freshness** and **completeness**:
-* **Prioritizing Freshness (Coalescing):** Stricter flow control drops older provisional revisions in the queue to prevent stale messages from accumulating. While this drastically improves message freshness, flow control alone can cause some updates to fail to reach the client, reducing normal update coverage. Combining flow control with `HISTORY` batching mitigates this by delivering queued finals together, restoring high final caption completeness (e.g., 95.21% under harsh impairment).
+* **Prioritizing Freshness (Coalescing):** Stricter flow control drops older provisional revisions in the queue to prevent stale messages from accumulating. While this drastically improves message freshness, flow control alone sends finals one per frame at the paced rate, so they fall behind and final completeness drops (59.55% in our harsh test). Combining flow control with `HISTORY` batching mitigates this by delivering queued finals together, restoring high final caption completeness (e.g., 95.21% under harsh impairment).
 * **Prioritizing Completeness:** Preserving stale ("unfresh") messages in the client's queue guarantees that clients see a more complete set of intermediate revisions, but severely degrades caption age and latency metrics.
-* **Disconnection and Unrecoverable Loss:** If a client is too slow and accumulates more than `MAX_PENDING_SEGMENTS` (256 finals) of unsent segments, the server terminates the connection. If the client takes longer than 60 seconds to reconnect, any captions generated between the connection termination and more than 60 seconds prior to reconnection will be permanently lost because they fall outside the server's 60-second bounded history window.
-* **Rate Estimation Delays:** Because the server uses RTT differences from ping packets to estimate client processing rates, rate information is inherently delayed, may adjust slowly to rapid network changes, and assumes the client DOM can process and render captions faster than the server sends them.
+* **Disconnection and Unrecoverable Loss:** If a client's queue still holds `MAX_PENDING_MESSAGES` (2048) messages after dropping all old revisions and provisionals, the server closes the connection. If the client takes longer than 60 seconds to reconnect, finals older than 60 seconds at reconnect time are lost, because `HISTORY` serves at most 60 seconds.
+* **Rate Estimation Delays:** Because the server uses RTT differences from ping packets to estimate client processing rates, rate information is inherently delayed and may adjust slowly to rapid network changes. A client's processing speed is only visible once its receive buffers fill and pongs are delayed.
 
 <!-- ## Optional ASR bonus
 
