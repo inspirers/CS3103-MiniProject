@@ -3,7 +3,7 @@
 ## Team members
 
 - Boisen Arvid Peter / A0360356E / client: replace revisions rather than appending duplicates, automatic reconnect + correct resume state, usable final UI
-- Lee Jin Timothy / A0309324J / bounded per-client application queues, slow-client isolation, semantic coalescing / backpressure
+- Lee Jin Timothy / A0309324J / bounded per-client application queues, slow-client isolation, semantic coalescing, backpressure
 - Sanfo Bimal Thomas / A0309330N / Frontend client: bounded local history, 15/30/60-second recall views, HISTORY merge and deduplication, reconnect/recovery integration
 - Foo Fang Han / A0301344W / handling source, source queue design, recent-history/late-join recovery, message deduplication
 
