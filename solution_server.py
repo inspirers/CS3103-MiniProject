@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-CS3103 Assignment 4 - LiveRecall naive working baseline.
+CS3103 Assignment 4 - LiveRecall Server Implementation
+Features: WebSocket connection handling, revision-based state distribution, 
+bounded history tracking, RTT-based lag detection, and semantic backpressure 
+with adaptive pacing and message coalescing.
 """
 
 from __future__ import annotations

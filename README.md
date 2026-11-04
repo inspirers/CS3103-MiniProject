@@ -4,6 +4,8 @@
 
 - Boisen Arvid Peter / A0360356E / client: replace revisions rather than appending duplicates, automatic reconnect + correct resume state, usable final UI
 - Lee Jin Timothy / A0309324J / bounded per-client application queues, slow-client isolation, semantic coalescing / backpressure
+- Sanfo Bimal Thomas / A0309330N / Frontend client: bounded local history, 15/30/60-second recall views, HISTORY merge and deduplication, reconnect/recovery integration
+- Foo Fang Han / A0301344W / handling source, source queue design, recent-history/late-join recovery, message deduplication
 
 ## Ubuntu setup
 
@@ -27,6 +29,7 @@ $ python -m pip install -r requirements.txt
 ```console
 $ python solution_server.py --port 8765
 ```
+Where 8765 is any valid port number
 
 ## Browser client
 
@@ -34,6 +37,7 @@ Exact commands/steps.
 ```console
 $ python -m http.server 8000 --directory client
 ```
+Where 8000 is any valid port number
 
 ## Public deterministic tests
 
