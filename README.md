@@ -10,10 +10,9 @@
 ## Ubuntu setup
 
 <!-- Exact commands from a fresh Ubuntu environment. -->
-
 ```console
-# sudo apt update
-# sudo apt install -y python3 python3-venv python3-pip iproute2 python-is-python3 python3-websockets
+$ sudo apt update
+$ sudo apt install -y python3 python3-venv python3-pip iproute2 python-is-python3 python3-websockets
 ```
 
 ## Install
@@ -70,7 +69,7 @@ Tests 1 to 3 were executed on a Hyper-V virtual machine running Ubuntu 26.04.1 L
 ### Test 4
 
 ```
-python run_demo.py --clients 100 --duration 60 --runs 3 \
+$ python run_demo.py --clients 100 --duration 60 --runs 3 \
   --disconnect-percent 20 --disconnect-at 15 --disconnect-seconds 5 \
   --output-stem t4 --quiet-server
 ```
@@ -80,49 +79,49 @@ python run_demo.py --clients 100 --duration 60 --runs 3 \
 #### Baseline
 
 ```
-sudo ./network_profiles/reset.sh lo
+$ sudo ./network_profiles/reset.sh lo
 
-python run_demo.py --clients 100 --duration 40 --runs 3 \
+$ python run_demo.py --clients 100 --duration 40 --runs 3 \
   --output-stem t5_baseline --quiet-server
 ```
 
 #### Fixed 100 ms delay
 
 ```
-sudo tc qdisc replace dev lo root netem delay 100ms
+$ sudo tc qdisc replace dev lo root netem delay 100ms
 
-python run_demo.py --clients 100 --duration 40 --runs 3 \
+$ python run_demo.py --clients 100 --duration 40 --runs 3 \
   --output-stem t5_delay --quiet-server
 
-sudo ./network_profiles/reset.sh lo
+$ sudo ./network_profiles/reset.sh lo
 ```
 
 #### 100 ms delay with 20 ms jitter
 
 ```
-sudo ./network_profiles/delay_100ms.sh lo
+$ sudo ./network_profiles/delay_100ms.sh lo
 
-python run_demo.py --clients 100 --duration 40 --runs 3 \
+$ python run_demo.py --clients 100 --duration 40 --runs 3 \
   --output-stem t5_jitter --quiet-server
 
-sudo ./network_profiles/reset.sh lo
+$ sudo ./network_profiles/reset.sh lo
 ```
 
 #### 3% packet loss
 
 ```
-sudo ./network_profiles/loss_3pct.sh lo
+$ sudo ./network_profiles/loss_3pct.sh lo
 
-python run_demo.py --clients 100 --duration 40 --runs 3 \
+$ python run_demo.py --clients 100 --duration 40 --runs 3 \
   --output-stem t5_loss --quiet-server
 
-sudo ./network_profiles/reset.sh lo
+$ sudo ./network_profiles/reset.sh lo
 ```
 
 Always reset any remaining traffic-control rules afterward:
 
 ```
-sudo ./network_profiles/reset.sh lo
+$ sudo ./network_profiles/reset.sh lo
 ```
 
 Tests 4 and 5 were executed on an Ubuntu Linux ARM64 (aarch64) virtual machine running under QEMU 10.0. The VM was allocated 4 GB of memory, an 8.7 GB virtual disk, and a shared virtio-net-pci network interface. For Test 5, Linux tc/netem rules were applied to the loopback interface to produce reproducible delay, jitter, and packet-loss conditions.
@@ -131,8 +130,8 @@ Tests 4 and 5 were executed on an Ubuntu Linux ARM64 (aarch64) virtual machine r
 
 <!-- Exact commands/steps for `caption_source.py`, browser clients, revision replacement, recall, late join, and reconnect/recovery. -->
 
-Before starting, ensure no leftover traffic-control (`tc`) network impairment rules are active on the loopback interface (`lo`):
-
+Before starting, ensure no leftover traffic-control (`tc`) network impairment rules are active on the loopback interface (`lo`):\
+_Note: $ indicates regular user, # means root_
 ```console
 # ./network_profiles/reset.sh lo
 ```
